@@ -32,6 +32,13 @@ func (h *fakeHost) Run(_ context.Context, spec backend.Spec) (backend.Result, er
 	return h.result, h.err
 }
 
+type provideCall struct {
+	distro  string
+	image   string
+	cmds    []string
+	rebuild bool
+}
+
 type prepareCall struct {
 	distro  string
 	pkgs    []string
@@ -47,10 +54,14 @@ type fakeContainers struct {
 	delay      map[string]time.Duration  // image -> run delay
 	block      bool                      // runs block until ctx is done
 
-	prepares []prepareCall
-	runs     []backend.Spec
-	active   int
-	peak     int
+	provides   map[string][]string // distro name -> commands a package exists for
+	provideErr map[string]error
+
+	prepares     []prepareCall
+	provideCalls []provideCall
+	runs         []backend.Spec
+	active       int
+	peak         int
 }
 
 func newFakeContainers() *fakeContainers {
@@ -60,6 +71,8 @@ func newFakeContainers() *fakeContainers {
 		results:    map[string]backend.Result{},
 		runErr:     map[string]error{},
 		delay:      map[string]time.Duration{},
+		provides:   map[string][]string{},
+		provideErr: map[string]error{},
 	}
 }
 
@@ -76,8 +89,32 @@ func (c *fakeContainers) Prepare(_ context.Context, d distro.Distro, pkgs []stri
 	return backend.Environment{Distro: d, Image: d.Image, ImageID: "sha256:" + d.Name, Shell: "dash"}, nil
 }
 
+// Provide derives the image "<image>+<cmd>+..." whose Provided commands
+// are those of cmds listed in c.provides for the distribution.
 func (c *fakeContainers) Provide(_ context.Context, env backend.Environment, cmds []string, rebuild bool) (backend.Environment, error) {
-	return env, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	name := env.Distro.Name
+	c.provideCalls = append(c.provideCalls, provideCall{name, env.Image, slices.Clone(cmds), rebuild})
+	if err := c.provideErr[name]; err != nil {
+		return backend.Environment{}, err
+	}
+	out := env
+	out.Image = env.Image + "+" + strings.Join(cmds, "+")
+	out.ImageID = env.ImageID + "+" + strings.Join(cmds, "+")
+	out.Provided = slices.Clone(env.Provided)
+	for _, cmd := range cmds {
+		if slices.Contains(c.provides[name], cmd) {
+			out.Provided = append(out.Provided, cmd)
+		}
+	}
+	return out, nil
+}
+
+func (c *fakeContainers) provided() []provideCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.provideCalls)
 }
 
 func (c *fakeContainers) Run(ctx context.Context, spec backend.Spec) (backend.Result, error) {
@@ -585,5 +622,282 @@ func TestIdenticalOutputHasNoNotes(t *testing.T) {
 	o := run(t, newEngine(&fakeHost{}, newFakeContainers()), Options{Command: "x"}, distros("a")).Outcomes[0]
 	if o.Status != Pass || o.Notes != nil {
 		t.Fatalf("outcome = %+v", o)
+	}
+}
+
+func notFoundResult(cmds ...string) backend.Result {
+	var stderr strings.Builder
+	for _, c := range cmds {
+		fmt.Fprintf(&stderr, "sh: %s: not found\n", c)
+	}
+	return backend.Result{Stderr: stderr.String(), ExitCode: 127}
+}
+
+func hasNote(o Outcome, kind explain.Kind, substr string) bool {
+	for _, n := range o.Notes {
+		if n.Kind == kind && strings.Contains(n.Message, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAutoInstallRerunsWithMissingCommand(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.results["a:latest+jq"] = backend.Result{Stdout: "1.7\n"}
+	c.provides["a"] = []string{"jq"}
+
+	rep := run(t, newEngine(host, c), Options{Command: "jq --version", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS after installing jq: %+v", o.Status, o)
+	}
+	calls := c.provided()
+	if len(calls) != 1 || !slices.Equal(calls[0].cmds, []string{"jq"}) || calls[0].image != "a:latest" {
+		t.Fatalf("Provide calls = %+v, want one for jq on a:latest", calls)
+	}
+	if o.Env.Image != "a:latest+jq" || !slices.Equal(o.Env.Provided, []string{"jq"}) {
+		t.Errorf("Env = %+v, want the derived environment", o.Env)
+	}
+	if c.runCount() != 2 {
+		t.Errorf("runs = %d, want 2", c.runCount())
+	}
+	if !hasNote(o, explain.KindInstalled, "jq") {
+		t.Errorf("notes = %+v, want an installed note naming jq", o.Notes)
+	}
+}
+
+func TestAutoInstallDisabled(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.provides["a"] = []string{"jq"}
+
+	rep := run(t, newEngine(host, c), Options{Command: "jq --version"}, distros("a"))
+	if rep.Outcomes[0].Status != Fail {
+		t.Errorf("status %s, want FAIL", rep.Outcomes[0].Status)
+	}
+	if calls := c.provided(); len(calls) != 0 {
+		t.Errorf("Provide called without AutoInstall: %+v", calls)
+	}
+	if c.runCount() != 1 {
+		t.Errorf("runs = %d, want 1", c.runCount())
+	}
+}
+
+func TestAutoInstallSkipsCommandsMissingOnHost(t *testing.T) {
+	host := &fakeHost{result: notFoundResult("jq")}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.provides["a"] = []string{"jq"}
+
+	rep := run(t, newEngine(host, c), Options{Command: "jq --version", AutoInstall: true}, distros("a"))
+	if rep.Outcomes[0].Status != Pass {
+		t.Errorf("status %s, want PASS", rep.Outcomes[0].Status)
+	}
+	if calls := c.provided(); len(calls) != 0 {
+		t.Errorf("Provide called for a command the host lacks too: %+v", calls)
+	}
+}
+
+func TestAutoInstallWithoutPackage(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+
+	rep := run(t, newEngine(host, c), Options{Command: "mytool", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Fail {
+		t.Fatalf("status %s, want FAIL", o.Status)
+	}
+	if len(c.provided()) != 1 {
+		t.Errorf("Provide calls = %+v, want one attempt", c.provided())
+	}
+	if c.runCount() != 1 {
+		t.Errorf("runs = %d, want 1: nothing was installed, so there is nothing to run again", c.runCount())
+	}
+	if o.Env.Image != "a:latest" || len(o.Env.Provided) != 0 {
+		t.Errorf("Env = %+v, want the original environment", o.Env)
+	}
+	if hasNote(o, explain.KindInstalled, "") {
+		t.Errorf("unexpected installed note: %+v", o.Notes)
+	}
+	found := false
+	for _, r := range o.Reasons {
+		if r.Kind == explain.KindMissingCommand && strings.Contains(r.Message, "no package") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("reasons = %+v, want a missing-command reason saying no package was found", o.Reasons)
+	}
+}
+
+func TestAutoInstallFailureKeepsResult(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.provideErr["a"] = errors.New("a: installing jq failed:\nnetwork unreachable")
+
+	rep := run(t, newEngine(host, c), Options{Command: "jq --version", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Fail {
+		t.Fatalf("status %s, want FAIL (an installation failure is not an ERROR)", o.Status)
+	}
+	if o.Result.ExitCode != 127 {
+		t.Errorf("result = %+v, want the original run", o.Result)
+	}
+	if !hasNote(o, explain.KindInstalled, "network unreachable") {
+		t.Errorf("notes = %+v, want the installation failure", o.Notes)
+	}
+}
+
+func TestAutoInstallSeveralRounds(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.results["a:latest+jq"] = notFoundResult("curl")
+	c.results["a:latest+jq+curl"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"jq", "curl"}
+
+	rep := run(t, newEngine(host, c), Options{Command: "jq . | curl", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS", o.Status)
+	}
+	calls := c.provided()
+	if len(calls) != 2 || calls[1].image != "a:latest+jq" || !slices.Equal(calls[1].cmds, []string{"curl"}) {
+		t.Fatalf("Provide calls = %+v, want jq then curl on top of it", calls)
+	}
+	if !slices.Equal(o.Env.Provided, []string{"jq", "curl"}) {
+		t.Errorf("Provided = %v", o.Env.Provided)
+	}
+}
+
+func TestAutoInstallInstallsEveryMissingCommandAtOnce(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq", "curl", "jq")
+	c.results["a:latest+jq+curl"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"jq", "curl"}
+
+	rep := run(t, newEngine(host, c), Options{Command: "x", AutoInstall: true}, distros("a"))
+	if rep.Outcomes[0].Status != Pass {
+		t.Fatalf("status %s, want PASS", rep.Outcomes[0].Status)
+	}
+	if calls := c.provided(); len(calls) != 1 || !slices.Equal(calls[0].cmds, []string{"jq", "curl"}) {
+		t.Fatalf("Provide calls = %+v, want one with jq and curl", calls)
+	}
+}
+
+func TestAutoInstallRoundsAreBounded(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	image := "a:latest"
+	var all []string
+	for i := range MaxInstallRounds + 2 {
+		cmd := fmt.Sprintf("tool%d", i)
+		all = append(all, cmd)
+		c.results[image] = notFoundResult(cmd)
+		image += "+" + cmd
+	}
+	c.provides["a"] = all
+
+	rep := run(t, newEngine(host, c), Options{Command: "x", AutoInstall: true}, distros("a"))
+	if n := len(c.provided()); n != MaxInstallRounds {
+		t.Errorf("Provide calls = %d, want at most %d", n, MaxInstallRounds)
+	}
+	if rep.Outcomes[0].Status != Fail {
+		t.Errorf("status %s, want FAIL", rep.Outcomes[0].Status)
+	}
+}
+
+func TestAutoInstallDoesNotRetryCommands(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq", "nopkg")
+	c.results["a:latest+jq+nopkg"] = notFoundResult("nopkg")
+	c.provides["a"] = []string{"jq"}
+
+	run(t, newEngine(host, c), Options{Command: "x", AutoInstall: true}, distros("a"))
+	if calls := c.provided(); len(calls) != 1 {
+		t.Errorf("Provide calls = %+v, want one: nopkg was already tried", calls)
+	}
+}
+
+func TestAutoInstallIgnoresBashisms(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stderr: "sh: 1: [[: not found\nsh: 1: source: not found\n"}
+
+	run(t, newEngine(host, c), Options{Command: "x", AutoInstall: true}, distros("a"))
+	if calls := c.provided(); len(calls) != 0 {
+		t.Errorf("Provide called for shell keywords: %+v", calls)
+	}
+}
+
+func TestAutoInstallPassesRebuild(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	run(t, newEngine(host, c), Options{Command: "jq", AutoInstall: true, NoCache: true}, distros("a"))
+	if calls := c.provided(); len(calls) != 1 || !calls[0].rebuild {
+		t.Errorf("Provide calls = %+v, want rebuild with NoCache", calls)
+	}
+}
+
+func TestAutoInstallAfterCachedResult(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.results["a:latest+jq"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"jq"}
+	e := cachedEngine(t, host, c)
+	opts := Options{Command: "jq", AutoInstall: true}
+
+	run(t, e, opts, distros("a"))
+	rep := run(t, e, opts, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Pass || !o.Cached {
+		t.Errorf("second run: status %s cached %v, want a cached PASS", o.Status, o.Cached)
+	}
+	if c.runCount() != 2 {
+		t.Errorf("runs = %d, want 2: both results come from the cache the second time", c.runCount())
+	}
+}
+
+func TestAutoInstallProgressStage(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.results["a:latest+jq"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"jq"}
+	var stages []Stage
+	e := newEngine(host, c)
+	e.Progress = func(ev Event) { stages = append(stages, ev.Stage) }
+
+	run(t, e, Options{Command: "jq", AutoInstall: true}, distros("a"))
+	want := []Stage{StagePreparing, StageRunning, StageInstalling, StageRunning, StageDone}
+	if !slices.Equal(stages, want) {
+		t.Errorf("stages = %v, want %v", stages, want)
+	}
+}
+
+func TestAutoInstallCancelled(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	ctx, cancel := context.WithCancel(context.Background())
+	c.provideErr["a"] = context.Canceled
+	e := newEngine(host, c)
+	e.Progress = func(ev Event) {
+		if ev.Stage == StageInstalling {
+			cancel()
+		}
+	}
+	if _, err := e.Run(ctx, Options{Command: "jq", AutoInstall: true}, distros("a")); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }

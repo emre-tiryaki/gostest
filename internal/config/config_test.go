@@ -31,7 +31,8 @@ func TestLoadFull(t *testing.T) {
 		"timeout": "90s",
 		"engine": "podman",
 		"ignore_stderr": true,
-		"strict_order": true
+		"strict_order": true,
+		"no_auto_install": true
 	}`)
 	c, err := Load(p)
 	if err != nil {
@@ -46,6 +47,7 @@ func TestLoadFull(t *testing.T) {
 		Engine:        "podman",
 		IgnoreStderr:  true,
 		StrictOrder:   true,
+		NoAutoInstall: true,
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Fatalf("Load = %+v\nwant  %+v", c, want)

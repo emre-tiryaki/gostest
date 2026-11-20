@@ -426,3 +426,62 @@ func TestPackagesEmpty(t *testing.T) {
 		t.Error("Packages with per-distro entries is not empty")
 	}
 }
+
+func TestProvideScript(t *testing.T) {
+	tests := []struct {
+		pm   PackageManager
+		want string
+	}{
+		{APK, `for c in 'jq' 'curl'; do apk add --no-cache "cmd:$c" || true; done`},
+		{APT, `apt-get update && { for c in 'jq' 'curl'; do DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$c" || true; done; rm -rf /var/lib/apt/lists/*; }`},
+		{DNF, `for c in 'jq' 'curl'; do dnf install -y "/usr/bin/$c" || true; done; dnf clean all`},
+		{Pacman, `pacman -Syu --noconfirm && for c in 'jq' 'curl'; do pacman -S --noconfirm --needed "$c" || true; done`},
+		{Zypper, `zypper --non-interactive refresh && { for c in 'jq' 'curl'; do zypper --non-interactive install --no-recommends "/usr/bin/$c" || true; done; zypper clean --all; }`},
+		{Emerge, `(emerge-webrsync --quiet || emerge --sync --quiet) && for c in 'jq' 'curl'; do emerge --quiet --noreplace "$c" || true; done`},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.pm), func(t *testing.T) {
+			got, err := ProvideScript(tt.pm, []string{"jq", "curl"})
+			if err != nil {
+				t.Fatalf("ProvideScript: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ProvideScript(%s)\n got: %s\nwant: %s", tt.pm, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProvideScriptNoCommands(t *testing.T) {
+	for _, pm := range []PackageManager{APT, DNF, APK, Pacman, Zypper, Emerge} {
+		got, err := ProvideScript(pm, nil)
+		if err != nil || got != "" {
+			t.Errorf("ProvideScript(%s, nil) = %q, %v; want empty, nil", pm, got, err)
+		}
+	}
+}
+
+func TestProvideScriptErrors(t *testing.T) {
+	if _, err := ProvideScript("brew", []string{"jq"}); err == nil {
+		t.Error("unknown package manager should fail")
+	}
+	bad := []string{"", "a b", "jq;id", "$(id)", "`id`", "'q'", "\"q\"", "a|b", "-rf", "a/b", "../x", "a\nb", "cmd:x", "=jq"}
+	for _, c := range bad {
+		if _, err := ProvideScript(APK, []string{"jq", c}); err == nil {
+			t.Errorf("command %q should be rejected", c)
+		}
+	}
+}
+
+func TestValidCommandName(t *testing.T) {
+	for _, c := range []string{"jq", "python3", "g++", "7z", "x86_64-linux-gnu-gcc", "pip3.12"} {
+		if !ValidCommandName(c) {
+			t.Errorf("%q should be valid", c)
+		}
+	}
+	for _, c := range []string{"", ".hidden", "-x", "a/b", "a b", "a;b", "a:b", strings.Repeat("a", 129)} {
+		if ValidCommandName(c) {
+			t.Errorf("%q should be invalid", c)
+		}
+	}
+}

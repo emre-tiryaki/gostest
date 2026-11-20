@@ -1,6 +1,7 @@
 package explain
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -427,4 +428,58 @@ func TestExplainDifferentContentIsNotReordered(t *testing.T) {
 	reasons := Explain(ref, got, cmp, dashCtx)
 	mustFind(t, reasons, KindStdout)
 	mustNotFind(t, reasons, KindReordered)
+}
+
+func TestMissingCommands(t *testing.T) {
+	tests := map[string][]string{
+		"sh: 1: fzf: not found":                                                    {"fzf"},
+		"sh: fzf: not found":                                                       {"fzf"},
+		"bash: line 1: fzf: command not found":                                     {"fzf"},
+		"zsh:1: command not found: fzf":                                            {"fzf"},
+		"env: 'python3': No such file or directory":                                {"python3"},
+		"env: can't execute 'python3': No such file or directory":                  {"python3"},
+		"which: no fzf in (/usr/bin:/bin)":                                         {"fzf"},
+		"bash: ./run.sh: /usr/bin/zsh: bad interpreter: No such file or directory": {"zsh"},
+		"sh: 1: [[: not found":                                                     nil,
+		"sh: source: not found":                                                    nil,
+		"sh: 1: ./run.sh: not found":                                               nil,
+		"sh: 1: /opt/tool/bin/x: not found":                                        nil,
+		"grep: invalid option -- 'P'":                                              nil,
+		"cat: /etc/foo: No such file or directory":                                 nil,
+	}
+	for line, want := range tests {
+		t.Run(line, func(t *testing.T) {
+			got := MissingCommands(backend.Result{}, backend.Result{Stderr: line + "\n"})
+			if !slices.Equal(got, want) {
+				t.Errorf("MissingCommands = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestMissingCommandsOnlyNewAndUnique(t *testing.T) {
+	ref := backend.Result{Stderr: "sh: jq: not found\n"}
+	got := backend.Result{Stderr: "sh: jq: not found\nsh: fzf: not found\nsh: curl: not found\nsh: fzf: not found\nbash: line 3: curl: command not found\n"}
+	if cmds := MissingCommands(ref, got); !slices.Equal(cmds, []string{"fzf", "curl"}) {
+		t.Errorf("MissingCommands = %q, want [fzf curl]: jq is missing on the host too", cmds)
+	}
+}
+
+func TestMissingCommandsRejectsUnsafeNames(t *testing.T) {
+	got := MissingCommands(backend.Result{}, backend.Result{Stderr: "sh: $(id): not found\nsh: -x: not found\nsh: a'b: not found\n"})
+	if len(got) != 0 {
+		t.Errorf("MissingCommands = %q, want none", got)
+	}
+}
+
+func TestMissingCommandWithoutPackage(t *testing.T) {
+	c := Context{Distro: "alpine", Shell: "busybox ash", NotProvided: []string{"fzf"}}
+	reasons := explainStderr("sh: fzf: not found\n", 0, 127, c)
+	mustFind(t, reasons, KindMissingCommand, "`fzf`", "no package", "--pkg alpine=")
+
+	reasons = explainStderr("sh: jq: not found\n", 0, 127, c)
+	r := mustFind(t, reasons, KindMissingCommand, "`jq`")
+	if strings.Contains(r.Message, "no package") {
+		t.Errorf("jq was not tried, reason %q should not say no package was found", r.Message)
+	}
 }

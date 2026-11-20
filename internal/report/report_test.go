@@ -403,3 +403,33 @@ func TestJSONNotes(t *testing.T) {
 		t.Fatalf("outcome without notes: %+v", doc.Outcomes[1].Notes)
 	}
 }
+
+func TestJSONProvided(t *testing.T) {
+	rep := engine.Report{
+		Command: "jq",
+		Outcomes: []engine.Outcome{{
+			Distro: distro.Distro{Name: "alpine"},
+			Status: engine.Pass,
+			Env:    backend.Environment{Image: "gostest/alpine:abc", Packages: []string{"bash"}, Provided: []string{"jq"}},
+		}},
+	}
+	var b bytes.Buffer
+	if err := JSON(&b, rep); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Outcomes []struct {
+			Environment struct {
+				Packages []string `json:"packages"`
+				Provided []string `json:"provided"`
+			} `json:"environment"`
+		} `json:"outcomes"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	env := doc.Outcomes[0].Environment
+	if len(env.Provided) != 1 || env.Provided[0] != "jq" || len(env.Packages) != 1 {
+		t.Fatalf("environment = %+v, want packages and provided commands", env)
+	}
+}

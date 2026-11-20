@@ -61,6 +61,7 @@ type fakeContainers struct {
 	delay      time.Duration
 	block      bool
 	prepares   []prepareCall
+	provides   [][]string
 	runs       []backend.Spec
 	active     int
 	peak       int
@@ -80,8 +81,23 @@ func (c *fakeContainers) Prepare(_ context.Context, d distro.Distro, pkgs []stri
 	return backend.Environment{Distro: d, Image: "img-" + d.Name, ImageID: "sha256:" + d.Name, Shell: "dash"}, nil
 }
 
+// Provide derives the image "<image>+<cmd>+...", whose result is looked up
+// as "<distro>+<cmd>+..."; every command is reported as installed.
 func (c *fakeContainers) Provide(_ context.Context, env backend.Environment, cmds []string, rebuild bool) (backend.Environment, error) {
-	return env, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.provides = append(c.provides, cmds)
+	out := env
+	out.Image = env.Image + "+" + strings.Join(cmds, "+")
+	out.ImageID = env.ImageID + "+" + strings.Join(cmds, "+")
+	out.Provided = append(slices.Clone(env.Provided), cmds...)
+	return out, nil
+}
+
+func (c *fakeContainers) provideCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.provides)
 }
 
 func (c *fakeContainers) Run(ctx context.Context, spec backend.Spec) (backend.Result, error) {
@@ -732,5 +748,44 @@ func TestHostLocale(t *testing.T) {
 		if got := HostLocale(func(k string) string { return tt.env[k] }); got != tt.want {
 			t.Errorf("HostLocale(%v) = %q, want %q", tt.env, got, tt.want)
 		}
+	}
+}
+
+func TestAutoInstall(t *testing.T) {
+	setup := func() *harness {
+		h := newHarness(t)
+		h.containers.results["alpine"] = backend.Result{Stderr: "sh: jq: not found\n", ExitCode: 127}
+		h.containers.results["alpine+jq"] = backend.Result{Stdout: "ok\n"}
+		return h
+	}
+
+	h := setup()
+	expectExit(t, h, h.run("-d", "alpine", "jq"), ExitOK)
+	if h.containers.provideCount() != 1 {
+		t.Errorf("Provide calls = %d, want 1: installing is the default", h.containers.provideCount())
+	}
+	if !strings.Contains(h.stdout.String(), "jq") {
+		t.Errorf("the report should mention the installed command:\n%s", h.stdout.String())
+	}
+
+	h = setup()
+	expectExit(t, h, h.run("-d", "alpine", "--no-auto-install", "jq"), ExitFailed)
+	if h.containers.provideCount() != 0 {
+		t.Errorf("--no-auto-install still installed: %v", h.containers.provides)
+	}
+
+	h = setup()
+	h.writeConfig(t, `{"no_auto_install": true}`)
+	expectExit(t, h, h.run("-d", "alpine", "jq"), ExitFailed)
+	if h.containers.provideCount() != 0 {
+		t.Errorf("no_auto_install in the configuration still installed: %v", h.containers.provides)
+	}
+}
+
+func TestAutoInstallInUsage(t *testing.T) {
+	h := newHarness(t)
+	h.run("--help")
+	if !strings.Contains(h.stdout.String()+h.stderr.String(), "--no-auto-install") {
+		t.Error("usage should document --no-auto-install")
 	}
 }

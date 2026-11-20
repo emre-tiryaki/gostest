@@ -659,3 +659,200 @@ func TestMountPoint(t *testing.T) {
 		t.Fatal("MountPoint does not match Run's behaviour")
 	}
 }
+
+func alpineEnv(f *fakeEngine) Environment {
+	f.images["alpine:latest"] = "sha256:aaa"
+	return Environment{Distro: alpine, Image: "alpine:latest", ImageID: "sha256:aaa", Shell: "busybox ash", Packages: []string{"bash"}}
+}
+
+// availableRun reports the given commands as installed by the
+// availability check and behaves like the default fake otherwise.
+func availableRun(f *fakeEngine, cmds ...string) func(context.Context, string, string) ([]byte, []byte, int, error) {
+	return func(_ context.Context, image, command string) ([]byte, []byte, int, error) {
+		if command == ProbeCommand {
+			return []byte("/bin/busybox\n"), nil, 0, nil
+		}
+		var out strings.Builder
+		for _, c := range cmds {
+			if strings.Contains(command, "'"+c+"'") {
+				out.WriteString(c + "\n")
+			}
+		}
+		return []byte(out.String()), nil, 0, nil
+	}
+}
+
+func TestProvideBuildsOnTopOfEnvironment(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = availableRun(f, "jq", "curl")
+	got, err := newTestDocker(f).Provide(context.Background(), env, []string{"jq", "curl"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builds := f.callsTo("build")
+	if len(builds) != 1 {
+		t.Fatalf("build calls = %v", builds)
+	}
+	tag := argAfter(builds[0], "-t")
+	if !strings.HasPrefix(tag, "gostest/alpine:") {
+		t.Errorf("tag = %q, want gostest/alpine:<hash>", tag)
+	}
+	script, _ := distro.ProvideScript(distro.APK, []string{"jq", "curl"})
+	dockerfile := f.stdinOf("build")
+	if !strings.Contains(dockerfile, "FROM alpine:latest\n") || !strings.Contains(dockerfile, "RUN "+script+"\n") {
+		t.Errorf("Dockerfile = %q", dockerfile)
+	}
+	if got.Image != tag || got.ImageID != f.images[tag] {
+		t.Errorf("env = %+v, want image %s (%s)", got, tag, f.images[tag])
+	}
+	if !slices.Equal(got.Provided, []string{"jq", "curl"}) {
+		t.Errorf("Provided = %v", got.Provided)
+	}
+	if got.Shell != env.Shell || !slices.Equal(got.Packages, env.Packages) || got.Distro != env.Distro {
+		t.Errorf("env = %+v, want the rest of %+v kept", got, env)
+	}
+	if env.Provided != nil {
+		t.Errorf("input environment was modified: %+v", env)
+	}
+}
+
+func TestProvideReportsOnlyAvailableCommands(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	var checked []string
+	inner := availableRun(f, "jq")
+	f.run = func(ctx context.Context, image, command string) ([]byte, []byte, int, error) {
+		if command != ProbeCommand {
+			checked = append(checked, image)
+		}
+		return inner(ctx, image, command)
+	}
+	got, err := newTestDocker(f).Provide(context.Background(), env, []string{"jq", "nopkg"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Provided, []string{"jq"}) {
+		t.Errorf("Provided = %v, want only jq", got.Provided)
+	}
+	if !slices.Equal(checked, []string{got.Image}) {
+		t.Errorf("availability checked in %v, want the derived image %s", checked, got.Image)
+	}
+}
+
+func TestProvideIgnoresUnrequestedOutput(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = func(_ context.Context, _, command string) ([]byte, []byte, int, error) {
+		return []byte("jq\nmotd banner\n"), nil, 0, nil
+	}
+	got, err := newTestDocker(f).Provide(context.Background(), env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Provided, []string{"jq"}) {
+		t.Errorf("Provided = %v", got.Provided)
+	}
+}
+
+func TestProvideAccumulatesProvided(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	env.Provided = []string{"git"}
+	f.run = availableRun(f, "jq")
+	got, err := newTestDocker(f).Provide(context.Background(), env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Provided, []string{"git", "jq"}) {
+		t.Errorf("Provided = %v", got.Provided)
+	}
+}
+
+func TestProvideNothing(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	got, err := newTestDocker(f).Provide(context.Background(), env, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Image != env.Image || len(f.callsTo("build")) != 0 {
+		t.Errorf("env = %+v, builds = %v; want nothing done", got, f.callsTo("build"))
+	}
+}
+
+func TestProvideReusesAndRebuilds(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = availableRun(f, "jq")
+	d := newTestDocker(f)
+	first, err := d.Provide(context.Background(), env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := d.Provide(context.Background(), env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.builds != 1 || first.Image != second.Image {
+		t.Errorf("builds = %d, images %s / %s; want the image reused", f.builds, first.Image, second.Image)
+	}
+	if _, err := d.Provide(context.Background(), env, []string{"jq"}, true); err != nil {
+		t.Fatal(err)
+	}
+	builds := f.callsTo("build")
+	if len(builds) != 2 || !slices.Contains(builds[1], "--no-cache") {
+		t.Errorf("build calls = %v, want a --no-cache rebuild", builds)
+	}
+}
+
+func TestProvideTagDependsOnBaseImage(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = availableRun(f, "jq")
+	d := newTestDocker(f)
+	a, err := d.Provide(context.Background(), env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.ImageID = "sha256:other"
+	b, err := d.Provide(context.Background(), env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Image == b.Image {
+		t.Errorf("same tag %s for different base images", a.Image)
+	}
+}
+
+func TestProvideBuildFailure(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.buildErr = "ERROR: unable to select packages"
+	_, err := newTestDocker(f).Provide(context.Background(), env, []string{"jq"}, false)
+	if err == nil || !strings.Contains(err.Error(), "unable to select packages") || !strings.Contains(err.Error(), "jq") {
+		t.Fatalf("err = %v, want the build output and the command", err)
+	}
+}
+
+func TestProvideInvalidCommand(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	if _, err := newTestDocker(f).Provide(context.Background(), env, []string{"jq;id"}, false); err == nil {
+		t.Fatal("expected an error")
+	}
+	if len(f.callsTo("build")) != 0 {
+		t.Error("nothing should be built for an invalid command")
+	}
+}
+
+func TestProvideAvailabilityCheckFailure(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = func(context.Context, string, string) ([]byte, []byte, int, error) {
+		return nil, nil, -1, errors.New("exec: docker: killed")
+	}
+	if _, err := newTestDocker(f).Provide(context.Background(), env, []string{"jq"}, false); err == nil {
+		t.Fatal("expected an error")
+	}
+}
