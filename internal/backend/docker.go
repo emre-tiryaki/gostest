@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -71,8 +72,9 @@ func (d *Docker) Available(ctx context.Context) error {
 }
 
 // Run executes spec inside a new, automatically removed container. The
-// working directory is bind-mounted read-only at the same path as on the
-// host. On timeout or cancellation the container is force-removed.
+// working directory is bind-mounted read-only, at the same path as on the
+// host when that is safe (see MountPoint). On timeout or cancellation the
+// container is force-removed.
 func (d *Docker) Run(ctx context.Context, spec Spec) (Result, error) {
 	if strings.Contains(spec.Dir, ":") {
 		return Result{}, fmt.Errorf("cannot mount %q: paths containing ':' are not supported", spec.Dir)
@@ -80,7 +82,8 @@ func (d *Docker) Run(ctx context.Context, spec Spec) (Result, error) {
 	name := "gostest-" + randomHex(8)
 	args := []string{"run", "--rm", "--name", name, "--pull=never"}
 	if spec.Dir != "" {
-		args = append(args, "-v", spec.Dir+":"+spec.Dir+":ro", "-w", spec.Dir)
+		target := MountPoint(spec.Dir)
+		args = append(args, "-v", spec.Dir+":"+target+":ro", "-w", target)
 	}
 	args = append(args, "--entrypoint", "/bin/sh", spec.Image, "-c", spec.Command)
 
@@ -112,6 +115,35 @@ func (d *Docker) Run(ctx context.Context, spec Spec) (Result, error) {
 	}
 	res.ExitCode = code
 	return res, nil
+}
+
+// FallbackMountPoint is where working directories that cannot be mounted
+// in place are mounted inside containers.
+const FallbackMountPoint = "/work"
+
+// systemTrees are directories whose whole subtree belongs to the
+// distribution; mounting anything there would replace part of the
+// userland under test.
+var systemTrees = []string{"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32", "/proc", "/run", "/sbin", "/sys", "/usr", "/var"}
+
+// systemRoots are directories that must not be shadowed as a whole,
+// although their subdirectories are fine to mount.
+var systemRoots = []string{"/", "/home", "/media", "/mnt", "/opt", "/root", "/srv", "/tmp"}
+
+// MountPoint returns where the host directory dir is mounted inside
+// containers: at the same path, so paths in the output match the host,
+// unless that would shadow part of the distribution's filesystem.
+func MountPoint(dir string) string {
+	clean := filepath.Clean(dir)
+	if slices.Contains(systemRoots, clean) {
+		return FallbackMountPoint
+	}
+	for _, tree := range systemTrees {
+		if clean == tree || strings.HasPrefix(clean, tree+"/") {
+			return FallbackMountPoint
+		}
+	}
+	return clean
 }
 
 func (d *Docker) isEngineError(stderr string) bool {
