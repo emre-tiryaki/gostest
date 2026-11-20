@@ -133,3 +133,24 @@ func TestIntegrationInstallsPackages(t *testing.T) {
 		t.Fatalf("bash should be installed: %+v", res)
 	}
 }
+
+func TestIntegrationProvideMissingCommands(t *testing.T) {
+	d := realDocker(t)
+	env := prepare(t, d, alpine, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	got, err := d.Provide(ctx, env, []string{"jq", "gostest-no-such-command"}, false)
+	if err != nil {
+		t.Fatalf("Provide: %v", err)
+	}
+	if len(got.Provided) != 1 || got.Provided[0] != "jq" {
+		t.Fatalf("Provided = %v, want [jq]", got.Provided)
+	}
+	res, err := d.Run(ctx, Spec{Image: got.Image, Command: "echo '{\"a\":1}' | jq -c .a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Stdout != "1\n" || res.ExitCode != 0 {
+		t.Fatalf("jq did not run in the derived image: %+v", res)
+	}
+}
