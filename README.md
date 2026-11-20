@@ -58,7 +58,8 @@ The script is broken under dash, yet the exit code is still 0. A tool that only 
 5. A container per distribution is started in parallel with goroutines (with a concurrency limit and a timeout)
 6. The stdout, stderr and exit code of every environment are collected
 7. The results are compared with the reference
-8. PASS/FAIL and the differences are reported per distribution
+8. Commands that are missing in a distribution but work on your system are installed automatically, and the command runs again there
+9. PASS/FAIL and the differences are reported per distribution
 
 ## Use cases
 
@@ -147,6 +148,7 @@ PASS   fedora     /bin/sh = bash         exit 0  400ms
 | `--workdir DIR` | Working directory mounted into the containers. Default: current directory. |
 | `--config FILE` | Configuration file. Default: nearest `.gostest.json`. |
 | `--no-cache` | Ignore cached results and rebuild images. |
+| `--no-auto-install` | Do not install missing commands automatically (see below); test the images as they are. |
 | `--clear-cache` | Remove cached results. |
 | `--format FORMAT` | `text` or `json`. |
 | `--color WHEN` | `auto`, `always` or `never`. `NO_COLOR` is honoured. |
@@ -188,9 +190,38 @@ project defaults. Command line flags take precedence.
   "timeout": "90s",
   "engine": "docker",
   "ignore_stderr": false,
-  "strict_order": false
+  "strict_order": false,
+  "no_auto_install": false
 }
 ```
+
+### Missing commands
+
+Base images are minimal, so a command that works on your machine (`jq`,
+`curl`, `git` …) is often simply not installed in a container. By default
+gostest installs it for you: when a distribution reports a command as not
+found while the reference run did not, gostest builds an image on top of the
+distribution's one in which its package manager installs a package providing
+that command, then runs your command there again. Up to three rounds are
+made, because an installed tool may need further commands. The report notes
+what was installed:
+
+```text
+PASS   alpine     /bin/sh = busybox ash  exit 0  230ms
+       note: installed automatically because they were missing here: `jq`
+```
+
+How a package is found depends on the package manager: Alpine and the
+dnf/zypper distributions look up the package that provides the command
+(`apk add cmd:jq`, `dnf install /usr/bin/jq`); apt, pacman and emerge try the
+package with the same name as the command. When no package is found the
+outcome says so and suggests `--pkg distro=<package>`, which is also the way
+to install a package whose name differs from the command.
+
+Shell keywords such as `[[`, paths and commands that are missing on the host
+as well are never installed. The derived images are cached like the ones of
+`--pkg`. To test the images exactly as they are, pass `--no-auto-install` or
+set `"no_auto_install": true`.
 
 ### What gets explained
 
@@ -259,6 +290,7 @@ The project is at an early stage.
 - [x] Reference run and comparison
 - [x] Per-distro dependency installation and image cache
 - [x] Result cache and `--no-cache`
+- [x] Automatic installation of missing commands and `--no-auto-install`
 - [x] Concurrency limit and timeout configuration
 - [x] Detailed reporting that shows the cause of a difference
 
