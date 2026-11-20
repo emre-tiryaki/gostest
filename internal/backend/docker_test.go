@@ -619,3 +619,43 @@ func TestPrepareDetectsShell(t *testing.T) {
 		t.Fatalf("Shell = %q, want dash", env.Shell)
 	}
 }
+
+func TestDockerRunNeverMountsOverSystemDirectories(t *testing.T) {
+	unsafe := []string{"/", "/tmp", "/home", "/usr", "/usr/local/src", "/etc", "/etc/nginx", "/bin", "/sbin",
+		"/lib", "/lib64", "/var", "/var/lib/x", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/opt"}
+	for _, dir := range unsafe {
+		t.Run(dir, func(t *testing.T) {
+			f := newFakeEngine()
+			if _, err := newTestDocker(f).Run(context.Background(), Spec{Command: "true", Image: "alpine", Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+			args := f.callsTo("run")[0]
+			if got := argAfter(args, "-v"); got != dir+":"+FallbackMountPoint+":ro" {
+				t.Errorf("mount = %q, want %s mounted at %s", got, dir, FallbackMountPoint)
+			}
+			if got := argAfter(args, "-w"); got != FallbackMountPoint {
+				t.Errorf("workdir = %q, want %s", got, FallbackMountPoint)
+			}
+		})
+	}
+}
+
+func TestDockerRunMountsProjectDirectoriesInPlace(t *testing.T) {
+	for _, dir := range []string{"/home/u/proj", "/tmp/build", "/srv/app", "/opt/tool/src", "/root/proj", "/mnt/data/x", "/usrlocal"} {
+		t.Run(dir, func(t *testing.T) {
+			f := newFakeEngine()
+			if _, err := newTestDocker(f).Run(context.Background(), Spec{Command: "true", Image: "alpine", Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+			if got := argAfter(f.callsTo("run")[0], "-v"); got != dir+":"+dir+":ro" {
+				t.Errorf("mount = %q, want in place", got)
+			}
+		})
+	}
+}
+
+func TestMountPoint(t *testing.T) {
+	if MountPoint("/home/u/proj") != "/home/u/proj" || MountPoint("/etc") != FallbackMountPoint || MountPoint("/usr/x/") != FallbackMountPoint {
+		t.Fatal("MountPoint does not match Run's behaviour")
+	}
+}
