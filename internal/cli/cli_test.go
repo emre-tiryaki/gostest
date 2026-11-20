@@ -65,11 +65,28 @@ type fakeContainers struct {
 	runs       []backend.Spec
 	active     int
 	peak       int
+
+	cleanups      int
+	cleanupErr    error
+	cleanupCtxErr error // ctx.Err() seen by the last Cleanup
 }
 
 func (c *fakeContainers) Name() string                    { return c.name }
 func (c *fakeContainers) Available(context.Context) error { return c.availErr }
-func (c *fakeContainers) Cleanup(context.Context) error   { return nil }
+
+func (c *fakeContainers) Cleanup(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cleanups++
+	c.cleanupCtxErr = ctx.Err()
+	return c.cleanupErr
+}
+
+func (c *fakeContainers) cleanupCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cleanups
+}
 
 func (c *fakeContainers) Prepare(_ context.Context, d distro.Distro, pkgs []string, rebuild bool) (backend.Environment, error) {
 	c.mu.Lock()
@@ -788,5 +805,75 @@ func TestAutoInstallInUsage(t *testing.T) {
 	h.run("--help")
 	if !strings.Contains(h.stdout.String()+h.stderr.String(), "--no-auto-install") {
 		t.Error("usage should document --no-auto-install")
+	}
+}
+
+func TestCleanup(t *testing.T) {
+	h := newHarness(t)
+	expectExit(t, h, h.run("-d", "alpine", "true"), ExitOK)
+	if n := h.containers.cleanupCount(); n != 0 {
+		t.Errorf("Cleanup calls = %d without --cleanup, want 0", n)
+	}
+
+	h = newHarness(t)
+	expectExit(t, h, h.run("-d", "alpine", "--cleanup", "true"), ExitOK)
+	if n := h.containers.cleanupCount(); n != 1 {
+		t.Errorf("Cleanup calls = %d with --cleanup, want 1", n)
+	}
+
+	h = newHarness(t)
+	h.writeConfig(t, `{"cleanup": true}`)
+	expectExit(t, h, h.run("-d", "alpine", "true"), ExitOK)
+	if n := h.containers.cleanupCount(); n != 1 {
+		t.Errorf("Cleanup calls = %d with \"cleanup\": true, want 1", n)
+	}
+}
+
+func TestCleanupAfterFailedRun(t *testing.T) {
+	h := newHarness(t)
+	h.containers.results["alpine"] = backend.Result{Stdout: "different\n"}
+	expectExit(t, h, h.run("-d", "alpine", "--cleanup", "true"), ExitFailed)
+	if n := h.containers.cleanupCount(); n != 1 {
+		t.Fatalf("Cleanup calls = %d after differences, want 1", n)
+	}
+}
+
+func TestCleanupAfterInterruption(t *testing.T) {
+	h := newHarness(t)
+	h.containers.block = true
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	expectExit(t, h, h.app.Run(ctx, []string{"-d", "alpine", "--cleanup", "x"}), ExitInterrupted)
+	if n := h.containers.cleanupCount(); n != 1 {
+		t.Fatalf("Cleanup calls = %d after an interruption, want 1", n)
+	}
+	if h.containers.cleanupCtxErr != nil {
+		t.Fatalf("Cleanup got a finished context: %v", h.containers.cleanupCtxErr)
+	}
+}
+
+func TestCleanupFailureIsAWarning(t *testing.T) {
+	h := newHarness(t)
+	h.containers.cleanupErr = errors.New("image is being used")
+	expectExit(t, h, h.run("-d", "alpine", "--cleanup", "true"), ExitOK)
+	if !strings.Contains(h.stderr.String(), "image is being used") {
+		t.Fatalf("stderr should report the cleanup failure:\n%s", h.stderr)
+	}
+}
+
+func TestCleanupWithoutEngine(t *testing.T) {
+	h := newHarness(t)
+	h.containers.availErr = errors.New("daemon down")
+	expectExit(t, h, h.run("-d", "alpine", "--cleanup", "true"), ExitRuntime)
+	if n := h.containers.cleanupCount(); n != 0 {
+		t.Fatalf("Cleanup calls = %d without an engine, want 0", n)
+	}
+}
+
+func TestCleanupInUsage(t *testing.T) {
+	h := newHarness(t)
+	h.run("--help")
+	if !strings.Contains(h.stdout.String()+h.stderr.String(), "--cleanup") {
+		t.Error("usage should document --cleanup")
 	}
 }

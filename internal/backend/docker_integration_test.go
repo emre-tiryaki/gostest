@@ -154,3 +154,21 @@ func TestIntegrationProvideMissingCommands(t *testing.T) {
 		t.Fatalf("jq did not run in the derived image: %+v", res)
 	}
 }
+
+func TestIntegrationCleanupRemovesDerivedImages(t *testing.T) {
+	d := realDocker(t)
+	prepare(t, d, alpine, nil) // make sure the base image exists before
+	fresh := NewDocker("docker")
+	env := prepare(t, fresh, alpine, []string{"bash"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := fresh.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, ok, err := d.imageID(ctx, env.Image); err != nil || ok {
+		t.Fatalf("derived image %s still exists (err %v)", env.Image, err)
+	}
+	if _, ok, err := d.imageID(ctx, alpine.Image); err != nil || !ok {
+		t.Fatalf("base image %s that existed before was removed (err %v)", alpine.Image, err)
+	}
+}

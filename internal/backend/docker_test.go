@@ -25,6 +25,7 @@ type fakeEngine struct {
 	remote   map[string]string // pullable ref -> image ID
 	probe    map[string]string // image -> probe stdout
 	buildErr string            // non-empty: builds fail with this stderr
+	rmErr    map[string]string // ref -> stderr of a failing image rm
 	builds   int
 
 	version func() ([]byte, []byte, int, error)
@@ -35,6 +36,7 @@ func newFakeEngine() *fakeEngine {
 	return &fakeEngine{
 		images: map[string]string{},
 		remote: map[string]string{},
+		rmErr:  map[string]string{},
 		probe:  map[string]string{},
 	}
 }
@@ -59,6 +61,18 @@ func (f *fakeEngine) Exec(ctx context.Context, stdin io.Reader, name string, arg
 		return []byte("29.0.0\n"), nil, 0, nil
 	case "image":
 		ref := args[len(args)-1]
+		if args[1] == "rm" {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if msg := f.rmErr[ref]; msg != "" {
+				return nil, []byte(msg), 1, nil
+			}
+			if _, ok := f.images[ref]; !ok {
+				return nil, []byte("Error response from daemon: No such image: " + ref + "\n"), 1, nil
+			}
+			delete(f.images, ref)
+			return []byte("Untagged: " + ref + "\n"), nil, 0, nil
+		}
 		f.mu.Lock()
 		id, ok := f.images[ref]
 		f.mu.Unlock()
@@ -863,5 +877,172 @@ func TestDerivedTagIsValidImageReference(t *testing.T) {
 	repo, _, _ := strings.Cut(tag, ":")
 	if repo != strings.ToLower(repo) {
 		t.Errorf("derivedTag(%q) = %q: repository names must be lowercase", dist.Name, tag)
+	}
+}
+
+// removed returns the images removed with "image rm", in order.
+func (f *fakeEngine) removed() []string {
+	var out []string
+	for _, c := range f.callsTo("image") {
+		if c[1] == "rm" {
+			out = append(out, c[len(c)-1])
+		}
+	}
+	return out
+}
+
+func TestCleanupRemovesPulledAndBuiltImages(t *testing.T) {
+	f := newFakeEngine()
+	f.remote["alpine:latest"] = "sha256:aaa"
+	f.run = availableRun(f, "jq")
+	d := newTestDocker(f)
+	ctx := context.Background()
+	env, err := d.Prepare(ctx, alpine, []string{"bash"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provided, err := d.Provide(ctx, env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	// Images built on top of others go first, or removing the base
+	// would fail because of its children.
+	want := []string{provided.Image, env.Image, "alpine:latest"}
+	if got := f.removed(); !slices.Equal(got, want) {
+		t.Fatalf("removed %v, want %v", got, want)
+	}
+	if len(f.images) != 0 {
+		t.Fatalf("images left: %v", f.images)
+	}
+}
+
+func TestCleanupKeepsImagesThatExistedBefore(t *testing.T) {
+	f := newFakeEngine()
+	f.images["alpine:latest"] = "sha256:aaa"
+	d := newTestDocker(f)
+	env, err := d.Prepare(context.Background(), alpine, []string{"bash"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if got := f.removed(); !slices.Equal(got, []string{env.Image}) {
+		t.Fatalf("removed %v, want only the derived image %s", got, env.Image)
+	}
+	if _, ok := f.images["alpine:latest"]; !ok {
+		t.Fatal("a base image that was already there must be kept")
+	}
+}
+
+func TestCleanupRemovesReusedDerivedImages(t *testing.T) {
+	f := newFakeEngine()
+	f.images["alpine:latest"] = "sha256:aaa"
+	first := newTestDocker(f)
+	env, err := first.Prepare(context.Background(), alpine, []string{"bash"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A later run reuses the image built by an earlier one.
+	second := newTestDocker(f)
+	if _, err := second.Prepare(context.Background(), alpine, []string{"bash"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if got := f.removed(); !slices.Equal(got, []string{env.Image}) {
+		t.Fatalf("removed %v, want the reused gostest image %s", got, env.Image)
+	}
+}
+
+func TestCleanupWithoutImages(t *testing.T) {
+	f := newFakeEngine()
+	f.images["alpine:latest"] = "sha256:aaa"
+	d := newTestDocker(f)
+	if _, err := d.Prepare(context.Background(), alpine, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if got := f.removed(); len(got) != 0 {
+		t.Fatalf("removed %v, want nothing", got)
+	}
+}
+
+func TestCleanupRemovesEachImageOnce(t *testing.T) {
+	f := newFakeEngine()
+	f.remote["alpine:latest"] = "sha256:aaa"
+	d := newTestDocker(f)
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Go(func() {
+			if _, err := d.Prepare(context.Background(), alpine, []string{"bash"}, false); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if err := d.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	got := f.removed()
+	if len(got) != 2 || got[1] != "alpine:latest" {
+		t.Fatalf("removed %v, want the derived image, then alpine:latest", got)
+	}
+	if err := d.Cleanup(context.Background()); err != nil {
+		t.Fatalf("second Cleanup: %v", err)
+	}
+	if again := f.removed(); len(again) != 2 {
+		t.Fatalf("a second Cleanup removed again: %v", again[2:])
+	}
+}
+
+func TestCleanupIgnoresImagesThatAreGone(t *testing.T) {
+	f := newFakeEngine()
+	f.remote["alpine:latest"] = "sha256:aaa"
+	d := newTestDocker(f)
+	if _, err := d.Prepare(context.Background(), alpine, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.images, "alpine:latest")
+	if err := d.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup of an image removed meanwhile: %v", err)
+	}
+}
+
+func TestCleanupAfterFailedPull(t *testing.T) {
+	f := newFakeEngine()
+	d := newTestDocker(f)
+	if _, err := d.Prepare(context.Background(), alpine, nil, false); err == nil {
+		t.Fatal("expected a pull error")
+	}
+	if err := d.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+}
+
+func TestCleanupReportsFailuresAndContinues(t *testing.T) {
+	f := newFakeEngine()
+	f.remote["alpine:latest"] = "sha256:aaa"
+	d := newTestDocker(f)
+	env, err := d.Prepare(context.Background(), alpine, []string{"bash"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.rmErr[env.Image] = "Error response from daemon: conflict: image is being used by running container 1234\n"
+	err = d.Cleanup(context.Background())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), env.Image) || !strings.Contains(err.Error(), "being used") {
+		t.Fatalf("err = %v, want image name and engine message", err)
+	}
+	if got := f.removed(); !slices.Contains(got, "alpine:latest") {
+		t.Fatalf("removed %v: the other images should still be removed", got)
 	}
 }
