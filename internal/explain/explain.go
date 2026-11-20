@@ -107,10 +107,18 @@ func Explain(ref, got backend.Result, cmp compare.Comparison, c Context) []Reaso
 		add(Reason{KindExitCode, exitMessage(got.ExitCode, ref.ExitCode)})
 	}
 	if !cmp.StdoutMatch {
-		add(Reason{KindStdout, "stdout differs from the reference"})
+		if compare.SameLines(ref.Stdout, got.Stdout) {
+			add(reordered("stdout", c, true))
+		} else {
+			add(Reason{KindStdout, "stdout differs from the reference"})
+		}
 	}
 	if !cmp.StderrMatch && causes == 0 {
-		add(Reason{KindStderr, "stderr differs from the reference"})
+		if compare.SameLines(ref.Stderr, got.Stderr) {
+			add(reordered("stderr", c, true))
+		} else {
+			add(Reason{KindStderr, "stderr differs from the reference"})
+		}
 	}
 	if got.Truncated {
 		add(Reason{KindTruncated, fmt.Sprintf("output was truncated at %d MiB; later differences are not shown", backend.MaxOutput>>20)})
@@ -292,4 +300,36 @@ func exitMessage(code, ref int) string {
 
 // Notes returns remarks about a run that are not differences, such as
 // streams that matched only because their order was ignored.
-func Notes(cmp compare.Comparison, c Context) []Reason { return nil }
+func Notes(cmp compare.Comparison, c Context) []Reason {
+	var out []Reason
+	if cmp.StdoutReordered {
+		out = append(out, reordered("stdout", c, false))
+	}
+	if cmp.StderrReordered {
+		out = append(out, reordered("stderr", c, false))
+	}
+	return out
+}
+
+// reordered describes a stream with the same lines as the reference in a
+// different order. strict is set when the order is being compared, so the
+// hint to enable --strict-order is left out.
+func reordered(stream string, c Context, strict bool) Reason {
+	msg := stream + " has the same lines in a different order"
+	loc := c.HostLocale
+	switch {
+	case loc != "" && !cLocale(loc) && strict:
+		msg += fmt.Sprintf(" (host locale %s, which the container does not inherit; LC_ALL=C in the command makes them agree)", loc)
+	case loc != "" && !cLocale(loc):
+		msg += fmt.Sprintf(" (host locale %s, which the container does not inherit)", loc)
+	}
+	if !strict {
+		msg += "; --strict-order fails this"
+	}
+	return Reason{KindReordered, msg}
+}
+
+// cLocale reports whether loc collates by byte value like the C locale.
+func cLocale(loc string) bool {
+	return loc == "C" || loc == "POSIX" || strings.HasPrefix(loc, "C.")
+}

@@ -572,4 +572,11 @@ Exit codes:
 
 // HostLocale returns the locale that decides collation on the host, as the C
 // library resolves it from LC_ALL, LC_COLLATE and LANG; empty when none is set.
-func HostLocale(getenv func(string) string) string { return "" }
+func HostLocale(getenv func(string) string) string {
+	for _, k := range []string{"LC_ALL", "LC_COLLATE", "LANG"} {
+		if v := getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}

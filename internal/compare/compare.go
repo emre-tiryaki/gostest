@@ -4,6 +4,7 @@ package compare
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/emre-tiryaki/gostest/internal/backend"
@@ -181,7 +182,34 @@ func (c Comparison) Reordered() bool { return c.StdoutReordered || c.StderrReord
 
 // SameLines reports whether a and b contain the same lines, counting
 // duplicates, in any order.
-func SameLines(a, b string) bool { return false }
+func SameLines(a, b string) bool {
+	a, b = normalize(a), normalize(b)
+	if a == b {
+		return true
+	}
+	if len(a) != len(b) || strings.HasSuffix(a, "\n") != strings.HasSuffix(b, "\n") {
+		return false
+	}
+	x := strings.Split(strings.TrimSuffix(a, "\n"), "\n")
+	y := strings.Split(strings.TrimSuffix(b, "\n"), "\n")
+	slices.Sort(x)
+	slices.Sort(y)
+	return slices.Equal(x, y)
+}
+
+// compareStream compares one normalized stream. A stream with the same
+// lines in a different order matches and is marked as reordered unless
+// strict is set.
+func compareStream(ref, got string, strict bool) (match, reordered bool, diff []Line) {
+	switch {
+	case ref == got:
+		return true, false, nil
+	case !strict && SameLines(ref, got):
+		return true, true, nil
+	default:
+		return false, false, Diff(ref, got)
+	}
+}
 
 func normalize(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
 
@@ -191,14 +219,11 @@ func normalize(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
 func Compare(ref, got backend.Result, opt Options) Comparison {
 	c := Comparison{ExitCodeMatch: ref.ExitCode == got.ExitCode && ref.TimedOut == got.TimedOut}
 
-	refOut, gotOut := normalize(ref.Stdout), normalize(got.Stdout)
-	if c.StdoutMatch = refOut == gotOut; !c.StdoutMatch {
-		c.StdoutDiff = Diff(refOut, gotOut)
-	}
-
-	refErr, gotErr := normalize(ref.Stderr), normalize(got.Stderr)
-	if c.StderrMatch = opt.IgnoreStderr || refErr == gotErr; !c.StderrMatch {
-		c.StderrDiff = Diff(refErr, gotErr)
+	c.StdoutMatch, c.StdoutReordered, c.StdoutDiff = compareStream(normalize(ref.Stdout), normalize(got.Stdout), opt.StrictOrder)
+	if opt.IgnoreStderr {
+		c.StderrMatch = true
+	} else {
+		c.StderrMatch, c.StderrReordered, c.StderrDiff = compareStream(normalize(ref.Stderr), normalize(got.Stderr), opt.StrictOrder)
 	}
 	return c
 }

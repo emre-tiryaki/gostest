@@ -109,6 +109,9 @@ func Text(out io.Writer, rep engine.Report, opt TextOptions) error {
 		if opt.Verbose {
 			writeOutput(w, o.Result)
 		}
+		for _, n := range o.Notes {
+			w.printf("%snote: %s\n", indent, w.paint(dim, n.Message))
+		}
 		if o.Status == engine.Fail {
 			writeDetails(w, o, opt.Context)
 		}
