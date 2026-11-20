@@ -291,13 +291,15 @@ func fingerprint(t *testing.T, dir string) string {
 
 func TestFingerprintDeterministic(t *testing.T) {
 	dir := project(t)
-	if fingerprint(t, dir) != fingerprint(t, dir) {
+	first, second := fingerprint(t, dir), fingerprint(t, dir)
+	if first != second {
 		t.Fatal("Fingerprint must be deterministic")
 	}
 }
 
 func TestFingerprintIndependentOfLocation(t *testing.T) {
-	if fingerprint(t, project(t)) != fingerprint(t, project(t)) {
+	a, b := fingerprint(t, project(t)), fingerprint(t, project(t))
+	if a != b {
 		t.Fatal("identical trees in different places should have the same fingerprint")
 	}
 }
