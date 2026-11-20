@@ -65,6 +65,8 @@ type Config struct {
 	IgnoreStderr bool `json:"ignore_stderr"`
 	// StrictOrder fails streams whose lines only differ in order.
 	StrictOrder bool `json:"strict_order"`
+	// NoAutoInstall disables installing missing commands automatically.
+	NoAutoInstall bool `json:"no_auto_install"`
 }
 
 // Load reads and validates the configuration file at path.

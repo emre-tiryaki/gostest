@@ -77,6 +77,9 @@ var (
 	// prefix used by Gentoo atoms (=, >=, <=, ~). Anything that could be
 	// interpreted by a shell is rejected.
 	pkgRe = regexp.MustCompile(`^[<>=~]{0,2}[A-Za-z0-9][A-Za-z0-9._+:@/~-]*$`)
+	// cmdRe accepts command names that are safe to quote in a script and
+	// to use as a package name or a file name under /usr/bin.
+	cmdRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 )
 
 // Registry resolves distribution names to Distro values.
@@ -251,6 +254,37 @@ func InstallScript(pm PackageManager, pkgs []string) (string, error) {
 		return "zypper --non-interactive refresh && zypper --non-interactive install --no-recommends " + list + " && zypper clean --all", nil
 	default: // Emerge
 		return "(emerge-webrsync --quiet || emerge --sync --quiet) && emerge --quiet --noreplace " + list, nil
+	}
+}
+
+// ValidCommandName reports whether c is a command name gostest can look
+// up a package for.
+func ValidCommandName(c string) bool { return cmdRe.MatchString(c) && len(c) <= 128 }
+
+// ProvideScript returns the shell script that tries to install, with pm, a
+// package providing each of cmds. A command no package provides is skipped,
+// so the script fails only when the package index cannot be used at all.
+// It returns an empty string when cmds is empty.
+func ProvideScript(pm PackageManager, cmds []string) (string, error) {
+	if !pm.Valid() {
+		return "", fmt.Errorf("unsupported package manager %q", pm)
+	}
+	if len(cmds) == 0 {
+		return "", nil
+	}
+	quoted := make([]string, len(cmds))
+	for i, c := range cmds {
+		if !ValidCommandName(c) {
+			return "", fmt.Errorf("invalid command name %q", c)
+		}
+		quoted[i] = "'" + c + "'"
+	}
+	list := strings.Join(quoted, " ")
+	switch pm {
+	case APK:
+		return "for c in " + list + `; do apk add --no-cache "cmd:$c" || true; done`, nil
+	default:
+		return "", fmt.Errorf("installing missing commands is not supported with %s", pm)
 	}
 }
 

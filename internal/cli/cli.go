@@ -119,6 +119,7 @@ type flags struct {
 	workdir      string
 	configPath   string
 	noCache      bool
+	noAutoInst   bool
 	clearCache   bool
 	format       string
 	color        string
@@ -163,6 +164,7 @@ func (a *App) parseFlags(args []string) (*flags, []string, error) {
 	fs.StringVar(&f.workdir, "workdir", "", "")
 	fs.StringVar(&f.configPath, "config", "", "")
 	fs.BoolVar(&f.noCache, "no-cache", false, "")
+	fs.BoolVar(&f.noAutoInst, "no-auto-install", false, "")
 	fs.BoolVar(&f.clearCache, "clear-cache", false, "")
 	fs.StringVar(&f.format, "format", "text", "")
 	fs.StringVar(&f.color, "color", "auto", "")
@@ -359,6 +361,7 @@ func (a *App) options(f *flags, cfg config.Config, reg *distro.Registry, command
 		Timeout:     DefaultTimeout,
 		Concurrency: DefaultConcurrency(),
 		NoCache:     f.noCache,
+		AutoInstall: !f.noAutoInst && !cfg.NoAutoInstall,
 		Compare: compare.Options{
 			IgnoreStderr: f.ignoreStderr || cfg.IgnoreStderr,
 			StrictOrder:  f.strictOrder || cfg.StrictOrder,
@@ -552,6 +555,8 @@ Flags:
                           containers (default: current directory)
       --config FILE       configuration file (default: nearest .gostest.json)
       --no-cache          ignore cached results and rebuild images
+      --no-auto-install   do not install packages for commands that are
+                          missing in a distribution
       --clear-cache       remove cached results
       --format FORMAT     text or json (default: text)
       --color WHEN        auto, always or never (default: auto)

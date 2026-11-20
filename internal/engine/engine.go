@@ -31,6 +31,10 @@ const (
 // Containers prepares images and runs commands in them.
 type Containers interface {
 	Prepare(ctx context.Context, d distro.Distro, pkgs []string, rebuild bool) (backend.Environment, error)
+	// Provide installs packages providing cmds on top of env and returns
+	// the new environment; its Provided field lists the commands that
+	// are available in it.
+	Provide(ctx context.Context, env backend.Environment, cmds []string, rebuild bool) (backend.Environment, error)
 	backend.Runner
 }
 
@@ -55,6 +59,9 @@ type Options struct {
 	Compare compare.Options
 	// Packages are installed into the distributions before running.
 	Packages distro.Packages
+	// AutoInstall installs packages for commands that are missing in a
+	// distribution but not on the host, and runs the command again.
+	AutoInstall bool
 }
 
 // Reference is the host run every distribution is compared with.
@@ -89,10 +96,11 @@ type Stage string
 
 // Stages.
 const (
-	StagePreparing Stage = "preparing"
-	StageRunning   Stage = "running"
-	StageCached    Stage = "cached"
-	StageDone      Stage = "done"
+	StagePreparing  Stage = "preparing"
+	StageRunning    Stage = "running"
+	StageInstalling Stage = "installing"
+	StageCached     Stage = "cached"
+	StageDone       Stage = "done"
 )
 
 // Event reports progress for one distribution.
@@ -248,6 +256,19 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 	}
 	if ref.err != nil {
 		return o
+	}
+	if opts.AutoInstall {
+		if missing := explain.MissingCommands(ref.result, o.Result); len(missing) > 0 {
+			e.emit(Event{Distro: d.Name, Stage: StageInstalling})
+			if env, err := e.Containers.Provide(ctx, o.Env, missing, opts.NoCache); err == nil {
+				o.Env = env
+				s := spec
+				s.Image = env.Image
+				if res, err := e.Containers.Run(ctx, s); err == nil {
+					o.Result = res
+				}
+			}
+		}
 	}
 	o.Comparison = compare.Compare(ref.result, o.Result, opts.Compare)
 	ec := explain.Context{

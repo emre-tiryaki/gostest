@@ -35,6 +35,7 @@ const (
 	KindStderr             Kind = "stderr"
 	KindTruncated          Kind = "truncated"
 	KindReordered          Kind = "reordered"
+	KindInstalled          Kind = "installed"
 )
 
 // Reason explains one aspect of a difference.
@@ -239,6 +240,22 @@ func diagnose(line string, c Context, busybox bool) (Reason, bool) {
 		return missingFile(m[1]), true
 	}
 	return Reason{}, false
+}
+
+// MissingCommands returns the commands that got reports as not found while
+// the reference does not, in order of appearance: the candidates for an
+// automatic installation.
+func MissingCommands(ref, got backend.Result) []string {
+	var out []string
+	for _, line := range newLines(ref.Stderr, got.Stderr) {
+		for _, re := range []*regexp.Regexp{reCmdNotFound, reNotFound} {
+			if m := re.FindStringSubmatch(line); m != nil {
+				out = append(out, m[1])
+				break
+			}
+		}
+	}
+	return out
 }
 
 func notFound(name string, c Context) Reason {

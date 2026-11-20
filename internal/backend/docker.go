@@ -211,6 +211,34 @@ func (d *Docker) Prepare(ctx context.Context, dist distro.Distro, pkgs []string,
 	return env, nil
 }
 
+// Provide builds, on top of env, an image in which the distribution's
+// package manager installed a package providing each of cmds, and returns
+// the environment of that image. Its Provided field lists the commands of
+// cmds that are available there.
+func (d *Docker) Provide(ctx context.Context, env Environment, cmds []string, rebuild bool) (Environment, error) {
+	script, err := distro.ProvideScript(env.Distro.PackageManager, cmds)
+	if err != nil {
+		return Environment{}, fmt.Errorf("%s: %w", env.Distro.Name, err)
+	}
+	if script == "" {
+		return env, nil
+	}
+	tag := derivedTag(env.Distro, env.ImageID, script)
+	if err := d.buildFrom(ctx, env.Distro, env.Image, tag, script, cmds, rebuild); err != nil {
+		return Environment{}, err
+	}
+	id, ok, err := d.imageID(ctx, tag)
+	if err != nil {
+		return Environment{}, err
+	} else if !ok {
+		return Environment{}, fmt.Errorf("%s: built image %s not found", env.Distro.Name, tag)
+	}
+	out := env
+	out.Image, out.ImageID = tag, id
+	out.Provided = append(slices.Clone(env.Provided), cmds...)
+	return out, nil
+}
+
 func derivedTag(dist distro.Distro, baseID, script string) string {
 	sum := sha256.Sum256([]byte(baseID + "\n" + script))
 	return "gostest/" + strings.ReplaceAll(dist.Name, ":", "-") + ":" + hex.EncodeToString(sum[:])[:12]
@@ -250,13 +278,18 @@ func (d *Docker) ensureImage(ctx context.Context, ref string) (string, error) {
 }
 
 func (d *Docker) build(ctx context.Context, dist distro.Distro, tag, script string, pkgs []string, noCache bool) error {
+	return d.buildFrom(ctx, dist, dist.Image, tag, script, pkgs, noCache)
+}
+
+// buildFrom builds tag from the image from by running script.
+func (d *Docker) buildFrom(ctx context.Context, dist distro.Distro, from, tag, script string, pkgs []string, noCache bool) error {
 	dir, err := os.MkdirTemp("", "gostest-build-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(dir)
 
-	dockerfile := "FROM " + dist.Image + "\n" +
+	dockerfile := "FROM " + from + "\n" +
 		"LABEL io.gostest.distro=" + dist.Name + "\n" +
 		"RUN " + script + "\n"
 	args := []string{"build", "-t", tag, "-f", "-"}

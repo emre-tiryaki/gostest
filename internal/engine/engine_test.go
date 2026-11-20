@@ -76,6 +76,10 @@ func (c *fakeContainers) Prepare(_ context.Context, d distro.Distro, pkgs []stri
 	return backend.Environment{Distro: d, Image: d.Image, ImageID: "sha256:" + d.Name, Shell: "dash"}, nil
 }
 
+func (c *fakeContainers) Provide(_ context.Context, env backend.Environment, cmds []string, rebuild bool) (backend.Environment, error) {
+	return env, nil
+}
+
 func (c *fakeContainers) Run(ctx context.Context, spec backend.Spec) (backend.Result, error) {
 	c.mu.Lock()
 	c.runs = append(c.runs, spec)

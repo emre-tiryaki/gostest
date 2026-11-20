@@ -59,6 +59,9 @@ type Environment struct {
 	// Shell is what /bin/sh is in the image, e.g. "dash".
 	Shell    string   `json:"shell"`
 	Packages []string `json:"packages,omitempty"`
+	// Provided lists the missing commands that were installed
+	// automatically, see Docker.Provide.
+	Provided []string `json:"provided,omitempty"`
 }
 
 // ProbeCommand prints what /bin/sh resolves to. The ls fallback covers
