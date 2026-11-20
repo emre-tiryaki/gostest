@@ -149,6 +149,7 @@ PASS   fedora     /bin/sh = bash         exit 0  400ms
 | `--config FILE` | Configuration file. Default: nearest `.gostest.json`. |
 | `--no-cache` | Ignore cached results and rebuild images. |
 | `--no-auto-install` | Do not install missing commands automatically (see below); test the images as they are. |
+| `--cleanup` | When the run ends, remove the images it pulled or built (see below). |
 | `--clear-cache` | Remove cached results. |
 | `--format FORMAT` | `text` or `json`. |
 | `--color WHEN` | `auto`, `always` or `never`. `NO_COLOR` is honoured. |
@@ -191,7 +192,8 @@ project defaults. Command line flags take precedence.
   "engine": "docker",
   "ignore_stderr": false,
   "strict_order": false,
-  "no_auto_install": false
+  "no_auto_install": false,
+  "cleanup": false
 }
 ```
 
@@ -222,6 +224,17 @@ Shell keywords such as `[[`, paths and commands that are missing on the host
 as well are never installed. The derived images are cached like the ones of
 `--pkg`. To test the images exactly as they are, pass `--no-auto-install` or
 set `"no_auto_install": true`.
+
+### Cleaning up
+
+Containers are always removed as soon as their command finishes or times
+out. The images stay, so the next run starts fast. With `--cleanup` (or
+`"cleanup": true`), gostest removes them when the run ends, even after
+Ctrl-C: every `gostest/...` image it built or reused (from `--pkg` and
+automatic installation) and every base image it had to pull. Base images
+that were already on your machine are kept. If an image cannot be removed,
+for example because another container uses it, gostest prints a warning and
+the exit code does not change.
 
 ### What gets explained
 
@@ -291,6 +304,7 @@ The project is at an early stage.
 - [x] Per-distro dependency installation and image cache
 - [x] Result cache and `--no-cache`
 - [x] Automatic installation of missing commands and `--no-auto-install`
+- [x] `--cleanup` to remove the images of a run
 - [x] Concurrency limit and timeout configuration
 - [x] Detailed reporting that shows the cause of a difference
 
