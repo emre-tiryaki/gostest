@@ -142,6 +142,7 @@ PASS   fedora     /bin/sh = bash         exit 0  400ms
 | `-j, --concurrency N` | Distributions processed at once. Default: number of CPUs. |
 | `-t, --timeout DURATION` | Timeout of every run, `0` disables it. Default: `2m`. |
 | `--ignore-stderr` | Compare only stdout and exit codes. |
+| `--strict-order` | Fail when output has the same lines in a different order (by default this passes with a note). |
 | `--engine NAME` | `docker` or `podman`. Default: auto-detect. |
 | `--workdir DIR` | Working directory mounted into the containers. Default: current directory. |
 | `--config FILE` | Configuration file. Default: nearest `.gostest.json`. |
@@ -186,7 +187,8 @@ project defaults. Command line flags take precedence.
   "concurrency": 4,
   "timeout": "90s",
   "engine": "docker",
-  "ignore_stderr": false
+  "ignore_stderr": false,
+  "strict_order": false
 }
 ```
 
@@ -202,39 +204,31 @@ stderr lines and the exit code and reports the likely cause:
 - missing files, permission errors and writes to the read-only mount
 - timeouts, signals and exit code meanings (126, 127, 128+n)
 - *silent failures*: errors were printed but the exit code is still 0
+- output that only differs in line order, with the host locale (see below)
 
 ### Locale and sort order
 
 The environment of the host is not passed into the containers, so they run
 with the `C` locale while your machine probably uses something like
-`en_US.UTF-8`. Anything whose output depends on collation can then differ
-even though the command works everywhere: `ls`, `sort`, glob expansion (`*`),
-`[a-z]` ranges and so on.
+`en_US.UTF-8`. Anything whose output depends on collation can then list the
+same lines in a different order: `ls`, `sort`, glob expansion (`*`), `[a-z]`
+ranges and so on. `en_US.UTF-8` sorts case insensitively, while `C` sorts by
+byte value and puts uppercase names first.
+
+By default a stream with the same lines (duplicates counted) in a different
+order **matches**, and the outcome carries a note instead:
 
 ```text
 $ gostest ls
-FAIL   debian     /bin/sh = dash         exit 0  241ms
-       why:
-         • stdout differs from the reference
-       stdout:
-           CLAUDE.md
-         + Makefile
-         + README.md
-           go.mod
-           ...
-           main.go
-         - Makefile
-         - README.md
+PASS   debian  /bin/sh = dash  exit 0  241ms
+       note: stdout has the same lines in a different order (host locale en_US.UTF-8, which the container does not inherit); --strict-order fails this
 ```
 
-The same lines appear in a different order: `en_US.UTF-8` sorts case
-insensitively, while `C` sorts by byte value and puts uppercase names first.
-gostest does not detect this case yet and only reports that stdout differs.
-To compare the behaviour rather than the locale, pin it in the command:
-
-```bash
-gostest 'LC_ALL=C ls'
-```
+When the order is what you are testing (`sort` itself, scripts whose steps
+must run in sequence), pass `--strict-order` or set `"strict_order": true`.
+Reordered output then fails, and the report says that only the order differs
+instead of a generic "stdout differs". To compare behaviour without the
+locale, pin it in the command: `gostest 'LC_ALL=C ls'`.
 
 ### Caching
 
