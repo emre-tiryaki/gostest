@@ -203,6 +203,39 @@ stderr lines and the exit code and reports the likely cause:
 - timeouts, signals and exit code meanings (126, 127, 128+n)
 - *silent failures*: errors were printed but the exit code is still 0
 
+### Locale and sort order
+
+The environment of the host is not passed into the containers, so they run
+with the `C` locale while your machine probably uses something like
+`en_US.UTF-8`. Anything whose output depends on collation can then differ
+even though the command works everywhere: `ls`, `sort`, glob expansion (`*`),
+`[a-z]` ranges and so on.
+
+```text
+$ gostest ls
+FAIL   debian     /bin/sh = dash         exit 0  241ms
+       why:
+         • stdout differs from the reference
+       stdout:
+           CLAUDE.md
+         + Makefile
+         + README.md
+           go.mod
+           ...
+           main.go
+         - Makefile
+         - README.md
+```
+
+The same lines appear in a different order: `en_US.UTF-8` sorts case
+insensitively, while `C` sorts by byte value and puts uppercase names first.
+gostest does not detect this case yet and only reports that stdout differs.
+To compare the behaviour rather than the locale, pin it in the command:
+
+```bash
+gostest 'LC_ALL=C ls'
+```
+
 ### Caching
 
 Images with installed packages are built once and tagged by a hash of the
