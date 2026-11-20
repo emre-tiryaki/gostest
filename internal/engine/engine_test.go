@@ -544,3 +544,42 @@ func TestManyDistros(t *testing.T) {
 		t.Fatalf("peak = %d, want <= 8", c.peak)
 	}
 }
+
+func TestReorderedOutputPassesWithNote(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "CLAUDE.md\ngo.mod\nMakefile\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stdout: "CLAUDE.md\nMakefile\ngo.mod\n"}
+	e := newEngine(host, c)
+	e.HostLocale = "en_US.UTF-8"
+	o := run(t, e, Options{Command: "ls"}, distros("a")).Outcomes[0]
+	if o.Status != Pass || o.Reasons != nil {
+		t.Fatalf("reordered output should pass: %+v", o)
+	}
+	if len(o.Notes) != 1 || o.Notes[0].Kind != explain.KindReordered || !strings.Contains(o.Notes[0].Message, "en_US.UTF-8") {
+		t.Fatalf("expected a reordered note naming the host locale: %+v", o.Notes)
+	}
+}
+
+func TestReorderedOutputFailsWithStrictOrder(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "a\nb\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stdout: "b\na\n"}
+	o := run(t, newEngine(host, c), Options{Command: "x", Compare: compare.Options{StrictOrder: true}}, distros("a")).Outcomes[0]
+	if o.Status != Fail || o.Notes != nil {
+		t.Fatalf("strict order should fail without notes: %+v", o)
+	}
+	found := false
+	for _, r := range o.Reasons {
+		found = found || r.Kind == explain.KindReordered
+	}
+	if !found {
+		t.Fatalf("expected a reordered reason: %+v", o.Reasons)
+	}
+}
+
+func TestIdenticalOutputHasNoNotes(t *testing.T) {
+	o := run(t, newEngine(&fakeHost{}, newFakeContainers()), Options{Command: "x"}, distros("a")).Outcomes[0]
+	if o.Status != Pass || o.Notes != nil {
+		t.Fatalf("outcome = %+v", o)
+	}
+}

@@ -370,3 +370,61 @@ func TestManyStderrLinesAreBounded(t *testing.T) {
 		t.Fatalf("got %d missing-command reasons, want 1..%d", n, MaxCauses)
 	}
 }
+
+var reorderRef = backend.Result{Stdout: "CLAUDE.md\ngo.mod\nMakefile\n"}
+var reorderGot = backend.Result{Stdout: "CLAUDE.md\nMakefile\ngo.mod\n"}
+
+func TestNotesReorderedStdout(t *testing.T) {
+	c := dashCtx
+	c.HostLocale = "en_US.UTF-8"
+	cmp := compare.Compare(reorderRef, reorderGot, compare.Options{})
+	notes := Notes(cmp, c)
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v", notes)
+	}
+	mustFind(t, notes, KindReordered, "stdout", "different order", "en_US.UTF-8", "--strict-order")
+}
+
+func TestNotesReorderedStderr(t *testing.T) {
+	cmp := compare.Compare(backend.Result{Stderr: "x\ny\n"}, backend.Result{Stderr: "y\nx\n"}, compare.Options{})
+	mustFind(t, Notes(cmp, dashCtx), KindReordered, "stderr", "different order")
+}
+
+func TestNotesWithoutHostLocale(t *testing.T) {
+	for _, loc := range []string{"", "C", "POSIX", "C.UTF-8"} {
+		c := dashCtx
+		c.HostLocale = loc
+		cmp := compare.Compare(reorderRef, reorderGot, compare.Options{})
+		r := mustFind(t, Notes(cmp, c), KindReordered, "different order")
+		if strings.Contains(r.Message, "locale") {
+			t.Errorf("host locale %q: no locale hint expected: %s", loc, r.Message)
+		}
+	}
+}
+
+func TestNotesNoneWhenNotReordered(t *testing.T) {
+	r := backend.Result{Stdout: "a\n"}
+	if n := Notes(compare.Compare(r, r, compare.Options{}), dashCtx); n != nil {
+		t.Fatalf("notes = %+v", n)
+	}
+}
+
+func TestExplainReorderedWithStrictOrder(t *testing.T) {
+	c := dashCtx
+	c.HostLocale = "en_US.UTF-8"
+	cmp := compare.Compare(reorderRef, reorderGot, compare.Options{StrictOrder: true})
+	reasons := Explain(reorderRef, reorderGot, cmp, c)
+	r := mustFind(t, reasons, KindReordered, "stdout", "different order", "en_US.UTF-8")
+	if strings.Contains(r.Message, "--strict-order") {
+		t.Errorf("under --strict-order the hint to enable it is pointless: %s", r.Message)
+	}
+	mustNotFind(t, reasons, KindStdout)
+}
+
+func TestExplainDifferentContentIsNotReordered(t *testing.T) {
+	ref, got := backend.Result{Stdout: "a\nb\n"}, backend.Result{Stdout: "b\nc\n"}
+	cmp := compare.Compare(ref, got, compare.Options{StrictOrder: true})
+	reasons := Explain(ref, got, cmp, dashCtx)
+	mustFind(t, reasons, KindStdout)
+	mustNotFind(t, reasons, KindReordered)
+}

@@ -365,3 +365,85 @@ func TestOpJSON(t *testing.T) {
 		t.Fatal("UnmarshalText(bogus) should fail")
 	}
 }
+
+func TestSameLines(t *testing.T) {
+	for _, tt := range []struct {
+		a, b string
+		want bool
+	}{
+		{"", "", true},
+		{"a\nb\n", "a\nb\n", true},
+		{"a\nb\n", "b\na\n", true},
+		{"a\nb", "b\na", true},
+		{"B\na\nC\n", "a\nB\nC\n", true},
+		{"a\na\nb\n", "a\nb\na\n", true},
+		{"a\na\nb\n", "a\nb\nb\n", false}, // duplicates are counted
+		{"a\nb\n", "a\n", false},
+		{"a\n", "a\nb\n", false},
+		{"a\nb\n", "b\na", false}, // trailing newline differs
+		{"a\nb\n", "a\nc\n", false},
+		{"", "\n", false},
+	} {
+		if got := SameLines(tt.a, tt.b); got != tt.want {
+			t.Errorf("SameLines(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+func TestCompareReorderedStdoutMatches(t *testing.T) {
+	ref := backend.Result{Stdout: "CLAUDE.md\ngo.mod\nMakefile\n"}
+	got := backend.Result{Stdout: "CLAUDE.md\nMakefile\ngo.mod\n"}
+	c := Compare(ref, got, Options{})
+	if !c.Match() || !c.StdoutMatch {
+		t.Fatalf("reordered stdout should match by default: %+v", c)
+	}
+	if !c.StdoutReordered || c.StderrReordered || !c.Reordered() {
+		t.Fatalf("stdout should be marked as reordered: %+v", c)
+	}
+	if c.StdoutDiff != nil {
+		t.Fatalf("a matching stream has no diff: %v", c.StdoutDiff)
+	}
+}
+
+func TestCompareReorderedStderrMatches(t *testing.T) {
+	c := Compare(backend.Result{Stderr: "x\ny\n"}, backend.Result{Stderr: "y\nx\n"}, Options{})
+	if !c.Match() || !c.StderrReordered || c.StdoutReordered || c.StderrDiff != nil {
+		t.Fatalf("reordered stderr should match by default: %+v", c)
+	}
+}
+
+func TestCompareStrictOrder(t *testing.T) {
+	ref := backend.Result{Stdout: "a\nb\n", Stderr: "x\ny\n"}
+	got := backend.Result{Stdout: "b\na\n", Stderr: "y\nx\n"}
+	c := Compare(ref, got, Options{StrictOrder: true})
+	if c.Match() || c.StdoutMatch || c.StderrMatch {
+		t.Fatalf("strict order must fail reordered streams: %+v", c)
+	}
+	if c.Reordered() {
+		t.Fatalf("strict order must not mark streams as reordered: %+v", c)
+	}
+	if c.StdoutDiff == nil || c.StderrDiff == nil {
+		t.Fatalf("strict order must keep the diffs: %+v", c)
+	}
+}
+
+func TestCompareIdenticalIsNotReordered(t *testing.T) {
+	r := backend.Result{Stdout: "a\nb\n", Stderr: "x\n"}
+	if c := Compare(r, r, Options{}); !c.Match() || c.Reordered() {
+		t.Fatalf("identical results: %+v", c)
+	}
+}
+
+func TestCompareDifferentContentStillFails(t *testing.T) {
+	c := Compare(backend.Result{Stdout: "a\nb\n"}, backend.Result{Stdout: "b\nc\n"}, Options{})
+	if c.Match() || c.StdoutReordered || c.StdoutDiff == nil {
+		t.Fatalf("different lines must still fail: %+v", c)
+	}
+}
+
+func TestCompareIgnoredStderrIsNotReordered(t *testing.T) {
+	c := Compare(backend.Result{Stderr: "x\ny\n"}, backend.Result{Stderr: "y\nx\n"}, Options{IgnoreStderr: true})
+	if !c.Match() || c.StderrReordered {
+		t.Fatalf("ignored stderr is not compared, so it is not reordered: %+v", c)
+	}
+}

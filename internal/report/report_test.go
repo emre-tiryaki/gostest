@@ -353,3 +353,53 @@ func TestFormatDuration(t *testing.T) {
 		}
 	}
 }
+
+func reorderedReport() engine.Report {
+	rep := sampleReport()
+	pass := rep.Outcomes[0]
+	pass.Notes = []explain.Reason{{Kind: explain.KindReordered, Message: "stdout has the same lines in a different order"}}
+	rep.Outcomes[0] = pass
+	return rep
+}
+
+func TestTextNotesOnPass(t *testing.T) {
+	out := text(t, reorderedReport(), TextOptions{})
+	if !strings.Contains(out, "note:") || !strings.Contains(out, "different order") {
+		t.Fatalf("passing outcome should show its notes:\n%s", out)
+	}
+	if strings.Index(out, "note:") > strings.Index(out, "debian") {
+		t.Error("the note should follow its own distro's line")
+	}
+	if l := lineWith(t, out, "archlinux"); !strings.HasPrefix(l, "PASS") {
+		t.Errorf("status should stay PASS: %q", l)
+	}
+}
+
+func TestTextNoNotesWithoutThem(t *testing.T) {
+	if out := text(t, sampleReport(), TextOptions{}); strings.Contains(out, "note:") {
+		t.Fatalf("unexpected note:\n%s", out)
+	}
+}
+
+func TestJSONNotes(t *testing.T) {
+	var b bytes.Buffer
+	if err := JSON(&b, reorderedReport()); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Outcomes []struct {
+			Notes []struct {
+				Kind string `json:"kind"`
+			} `json:"notes"`
+		} `json:"outcomes"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if n := doc.Outcomes[0].Notes; len(n) != 1 || n[0].Kind != "reordered" {
+		t.Fatalf("notes = %+v", n)
+	}
+	if doc.Outcomes[1].Notes != nil {
+		t.Fatalf("outcome without notes: %+v", doc.Outcomes[1].Notes)
+	}
+}

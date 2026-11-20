@@ -682,3 +682,51 @@ func TestListDistros(t *testing.T) {
 		t.Fatal("--list must not touch the container engine")
 	}
 }
+
+func TestStrictOrder(t *testing.T) {
+	reordered := backend.Result{Stdout: "b\nok\n"}
+	setup := func() *harness {
+		h := newHarness(t)
+		h.host.result = backend.Result{Stdout: "ok\nb\n"}
+		h.containers.results["alpine"] = reordered
+		return h
+	}
+
+	h := setup()
+	expectExit(t, h, h.run("-d", "alpine", "x"), ExitOK)
+	if !strings.Contains(h.stdout.String(), "different order") {
+		t.Errorf("a passing reordered run should carry a note:\n%s", h.stdout.String())
+	}
+
+	h = setup()
+	expectExit(t, h, h.run("-d", "alpine", "--strict-order", "x"), ExitFailed)
+
+	h = setup()
+	h.writeConfig(t, `{"strict_order": true}`)
+	expectExit(t, h, h.run("-d", "alpine", "x"), ExitFailed)
+}
+
+func TestStrictOrderInUsage(t *testing.T) {
+	h := newHarness(t)
+	h.run("--help")
+	if !strings.Contains(h.stdout.String()+h.stderr.String(), "--strict-order") {
+		t.Error("usage should document --strict-order")
+	}
+}
+
+func TestHostLocale(t *testing.T) {
+	for _, tt := range []struct {
+		env  map[string]string
+		want string
+	}{
+		{map[string]string{}, ""},
+		{map[string]string{"LANG": "en_US.UTF-8"}, "en_US.UTF-8"},
+		{map[string]string{"LANG": "en_US.UTF-8", "LC_COLLATE": "tr_TR.UTF-8"}, "tr_TR.UTF-8"},
+		{map[string]string{"LANG": "en_US.UTF-8", "LC_COLLATE": "tr_TR.UTF-8", "LC_ALL": "C"}, "C"},
+		{map[string]string{"LANG": "de_DE.UTF-8", "LC_ALL": ""}, "de_DE.UTF-8"},
+	} {
+		if got := HostLocale(func(k string) string { return tt.env[k] }); got != tt.want {
+			t.Errorf("HostLocale(%v) = %q, want %q", tt.env, got, tt.want)
+		}
+	}
+}
