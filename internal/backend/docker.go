@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emre-tiryaki/gostest/internal/distro"
@@ -42,6 +44,12 @@ type Docker struct {
 	Binary string
 	// Exec runs Binary; replaceable in tests.
 	Exec Executor
+
+	mu sync.Mutex
+	// owned lists, in the order they were first used, the images Cleanup
+	// removes: base images this Docker pulled and every gostest image it
+	// built or reused.
+	owned []string
 }
 
 // NewDocker returns a Docker backend using binary ("docker" or "podman").
@@ -146,9 +154,42 @@ func MountPoint(dir string) string {
 	return clean
 }
 
-// Cleanup removes the images this Docker pulled or built.
+// Cleanup removes the images this Docker pulled, built or reused from an
+// earlier run (gostest/...); base images that were already there are kept.
+// Images built on top of others are removed first. An image that no longer
+// exists is not an error; other failures are collected and returned after
+// trying every image. Containers need no cleanup: Run removes them.
 func (d *Docker) Cleanup(ctx context.Context) error {
-	return nil
+	d.mu.Lock()
+	owned := d.owned
+	d.owned = nil
+	d.mu.Unlock()
+
+	var errs []error
+	for _, ref := range slices.Backward(owned) {
+		_, stderr, code, err := d.Exec.Exec(ctx, nil, d.Binary, "image", "rm", ref)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("removing %s: %w", ref, err))
+			continue
+		}
+		if code == 0 {
+			continue
+		}
+		if _, exists, ierr := d.imageID(ctx, ref); ierr == nil && !exists {
+			continue
+		}
+		errs = append(errs, fmt.Errorf("removing %s: %s", ref, tail(string(stderr), 3)))
+	}
+	return errors.Join(errs...)
+}
+
+// own records ref for Cleanup.
+func (d *Docker) own(ref string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !slices.Contains(d.owned, ref) {
+		d.owned = append(d.owned, ref)
+	}
 }
 
 func (d *Docker) isEngineError(stderr string) bool {
@@ -263,6 +304,7 @@ func (d *Docker) available(ctx context.Context, image string, cmds []string) ([]
 // derive returns the ID of tag, building it from the image from with
 // script when it does not exist yet or rebuild is set.
 func (d *Docker) derive(ctx context.Context, dist distro.Distro, from, tag, script string, what []string, rebuild bool) (string, error) {
+	d.own(tag)
 	id, ok, err := d.imageID(ctx, tag)
 	if err != nil {
 		return "", err
@@ -303,6 +345,8 @@ func (d *Docker) ensureImage(ctx context.Context, ref string) (string, error) {
 	if id, ok, err := d.imageID(ctx, ref); err != nil || ok {
 		return id, err
 	}
+	// Owned before pulling, so an interrupted pull is cleaned up too.
+	d.own(ref)
 	stdout, stderr, code, err := d.Exec.Exec(ctx, nil, d.Binary, "pull", "--quiet", ref)
 	if err != nil {
 		return "", fmt.Errorf("pulling %s: %w", ref, err)
