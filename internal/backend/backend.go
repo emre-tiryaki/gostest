@@ -4,10 +4,20 @@ package backend
 
 import (
 	"context"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/emre-tiryaki/gostest/internal/distro"
 )
+
+// ExitTimeout is the exit code reported for commands that hit their timeout.
+// It matches the convention of timeout(1).
+const ExitTimeout = 124
+
+// MaxOutput is the maximum number of bytes captured per output stream.
+const MaxOutput = 1 << 20
 
 // Spec describes one command execution.
 type Spec struct {
@@ -16,7 +26,7 @@ type Spec struct {
 	// Image is the container image to run in. The host runner ignores it.
 	Image string
 	// Dir is the host working directory. Containers get it mounted
-	// read-only at the same path.
+	// read-only at the same path, so paths in the output match the host.
 	Dir string
 	// Timeout bounds the execution; zero means no limit.
 	Timeout time.Duration
@@ -32,26 +42,54 @@ type Result struct {
 	Duration  time.Duration `json:"duration"`
 }
 
-// Runner executes a Spec. A non-zero exit code is reported in the Result;
-// the error is reserved for failures to run the command at all.
+// Runner executes a Spec. A non-zero exit code or a timeout is reported in
+// the Result; the error is reserved for failures to run the command at all
+// and for cancellation of ctx.
 type Runner interface {
 	Run(ctx context.Context, spec Spec) (Result, error)
 }
 
 // Environment is a prepared container environment for one distribution.
 type Environment struct {
-	Distro   distro.Distro `json:"distro"`
-	Image    string        `json:"image"`
-	ImageID  string        `json:"image_id"`
-	Shell    string        `json:"shell"`
-	Packages []string      `json:"packages,omitempty"`
+	Distro distro.Distro `json:"distro"`
+	// Image is the image commands run in: the distribution's image, or a
+	// derived image with Packages installed.
+	Image   string `json:"image"`
+	ImageID string `json:"image_id"`
+	// Shell is what /bin/sh is in the image, e.g. "dash".
+	Shell    string   `json:"shell"`
+	Packages []string `json:"packages,omitempty"`
 }
 
-// ProbeCommand prints what /bin/sh resolves to.
-const ProbeCommand = "readlink -f /bin/sh"
+// ProbeCommand prints what /bin/sh resolves to. The ls fallback covers
+// images without readlink.
+const ProbeCommand = "readlink -f /bin/sh 2>/dev/null || ls -l /bin/sh"
 
-// ShellName turns ProbeCommand output into a shell name.
-func ShellName(probe string) string { return probe }
+// ShellName turns ProbeCommand output (or a resolved path) into a shell
+// name such as "dash", "bash" or "busybox ash".
+func ShellName(probe string) string {
+	lines := strings.Split(strings.TrimSpace(probe), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if i := strings.LastIndex(last, " -> "); i >= 0 {
+		last = strings.TrimSpace(last[i+len(" -> "):])
+	} else if fields := strings.Fields(last); len(fields) > 0 {
+		last = fields[len(fields)-1]
+	}
+	if last == "" {
+		return "unknown"
+	}
+	name := path.Base(last)
+	if name == "busybox" {
+		return "busybox ash"
+	}
+	return name
+}
 
 // HostShell reports what /bin/sh is on the host.
-func HostShell() string { return "" }
+func HostShell() string {
+	target, err := filepath.EvalSymlinks("/bin/sh")
+	if err != nil {
+		return "unknown"
+	}
+	return ShellName(target)
+}
