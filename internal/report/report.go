@@ -27,7 +27,7 @@ const (
 )
 
 // MaxDiffLines caps the rendered diff of one stream.
-const MaxDiffLines = 200
+const MaxDiffLines = 40
 
 // DefaultContext is the recommended number of unchanged lines shown around
 // each change.

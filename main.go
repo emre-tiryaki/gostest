@@ -8,24 +8,15 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/emre-tiryaki/gostest/internal/backend"
 	"github.com/emre-tiryaki/gostest/internal/cli"
 )
 
+// version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	app := &cli.App{
-		Stdout:    os.Stdout,
-		Stderr:    os.Stderr,
-		Host:      backend.Local{},
-		HostShell: backend.HostShell(),
-		NewContainers: func(engine string) (cli.Containers, error) {
-			return backend.NewDocker(engine), nil
-		},
-		Version: version,
-	}
-	os.Exit(app.Run(ctx, os.Args[1:]))
+	code := cli.New(version).Run(ctx, os.Args[1:])
+	stop()
+	os.Exit(code)
 }

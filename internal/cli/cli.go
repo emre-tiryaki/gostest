@@ -3,12 +3,22 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/emre-tiryaki/gostest/internal/backend"
+	"github.com/emre-tiryaki/gostest/internal/cache"
+	"github.com/emre-tiryaki/gostest/internal/compare"
+	"github.com/emre-tiryaki/gostest/internal/config"
 	"github.com/emre-tiryaki/gostest/internal/distro"
 	"github.com/emre-tiryaki/gostest/internal/engine"
 	"github.com/emre-tiryaki/gostest/internal/report"
@@ -16,11 +26,28 @@ import (
 
 // Exit codes.
 const (
-	ExitOK      = 0
-	ExitFailed  = 1
-	ExitUsage   = 2
+	// ExitOK: every distribution matches the reference.
+	ExitOK = 0
+	// ExitFailed: at least one distribution differs or could not run.
+	ExitFailed = 1
+	// ExitUsage: invalid flags, arguments or configuration.
+	ExitUsage = 2
+	// ExitRuntime: the reference or the container engine could not run.
 	ExitRuntime = 3
+	// ExitInterrupted: the run was cancelled (Ctrl-C).
+	ExitInterrupted = 130
 )
+
+// DefaultTimeout bounds each run unless configured otherwise.
+const DefaultTimeout = 2 * time.Minute
+
+// DefaultMaxFingerprintFiles bounds the working directory size for which
+// results are cached.
+const DefaultMaxFingerprintFiles = 20000
+
+// DefaultConcurrency is the number of distributions processed at once
+// unless configured otherwise.
+func DefaultConcurrency() int { return max(runtime.NumCPU(), 2) }
 
 // Containers is a container engine usable by gostest.
 type Containers interface {
@@ -29,50 +56,510 @@ type Containers interface {
 	Name() string
 }
 
-// App is the command line application with its dependencies.
+// App is the command line application with its dependencies, which tests
+// replace with fakes.
 type App struct {
 	Stdout, Stderr io.Writer
-	Host           backend.Runner
-	HostShell      string
-	NewContainers  func(engine string) (Containers, error)
-	Version        string
+	// StdoutTTY and StderrTTY tell whether the streams are terminals;
+	// they enable colours and progress output.
+	StdoutTTY, StderrTTY bool
+
+	Host          backend.Runner
+	HostShell     string
+	NewContainers func(engine string) (Containers, error)
+	LookPath      func(file string) (string, error)
+	Getwd         func() (string, error)
+	Getenv        func(key string) string
+	CacheDir      func() (string, error)
+
+	// MaxFingerprintFiles overrides DefaultMaxFingerprintFiles when > 0.
+	MaxFingerprintFiles int
+	Version             string
+}
+
+// New returns an App wired to the real system.
+func New(version string) *App {
+	return &App{
+		Stdout:    os.Stdout,
+		Stderr:    os.Stderr,
+		StdoutTTY: isTerminal(os.Stdout),
+		StderrTTY: isTerminal(os.Stderr),
+		Host:      backend.Local{},
+		HostShell: backend.HostShell(),
+		NewContainers: func(engine string) (Containers, error) {
+			return backend.NewDocker(engine), nil
+		},
+		LookPath: exec.LookPath,
+		Getwd:    os.Getwd,
+		Getenv:   os.Getenv,
+		CacheDir: cache.DefaultDir,
+		Version:  version,
+	}
+}
+
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (s *stringList) String() string     { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
+
+type flags struct {
+	distros      string
+	pkgs         stringList
+	concurrency  int
+	timeout      time.Duration
+	ignoreStderr bool
+	engine       string
+	workdir      string
+	configPath   string
+	noCache      bool
+	clearCache   bool
+	format       string
+	color        string
+	context      int
+	verbose      bool
+	quiet        bool
+	list         bool
+	version      bool
+
+	set map[string]bool // flags given on the command line, by long name
+}
+
+// aliases maps short flag names to their long names.
+var aliases = map[string]string{"d": "distros", "p": "pkg", "j": "concurrency", "t": "timeout", "v": "verbose", "q": "quiet", "h": "help"}
+
+func (a *App) parseFlags(args []string) (*flags, []string, error) {
+	f := &flags{}
+	fs := flag.NewFlagSet("gostest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	for _, name := range []string{"d", "distros"} {
+		fs.StringVar(&f.distros, name, "", "")
+	}
+	for _, name := range []string{"p", "pkg"} {
+		fs.Var(&f.pkgs, name, "")
+	}
+	for _, name := range []string{"j", "concurrency"} {
+		fs.IntVar(&f.concurrency, name, 0, "")
+	}
+	for _, name := range []string{"t", "timeout"} {
+		fs.DurationVar(&f.timeout, name, DefaultTimeout, "")
+	}
+	for _, name := range []string{"v", "verbose"} {
+		fs.BoolVar(&f.verbose, name, false, "")
+	}
+	for _, name := range []string{"q", "quiet"} {
+		fs.BoolVar(&f.quiet, name, false, "")
+	}
+	fs.BoolVar(&f.ignoreStderr, "ignore-stderr", false, "")
+	fs.StringVar(&f.engine, "engine", "", "")
+	fs.StringVar(&f.workdir, "workdir", "", "")
+	fs.StringVar(&f.configPath, "config", "", "")
+	fs.BoolVar(&f.noCache, "no-cache", false, "")
+	fs.BoolVar(&f.clearCache, "clear-cache", false, "")
+	fs.StringVar(&f.format, "format", "text", "")
+	fs.StringVar(&f.color, "color", "auto", "")
+	fs.IntVar(&f.context, "context", report.DefaultContext, "")
+	fs.BoolVar(&f.list, "list", false, "")
+	fs.BoolVar(&f.version, "version", false, "")
+
+	if err := fs.Parse(args); err != nil {
+		return nil, nil, err
+	}
+	f.set = map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) {
+		name := fl.Name
+		if long, ok := aliases[name]; ok {
+			name = long
+		}
+		f.set[name] = true
+	})
+	return f, fs.Args(), nil
+}
+
+func (f *flags) validate() error {
+	switch {
+	case f.format != "text" && f.format != "json":
+		return fmt.Errorf("invalid --format %q: use text or json", f.format)
+	case f.color != "auto" && f.color != "always" && f.color != "never":
+		return fmt.Errorf("invalid --color %q: use auto, always or never", f.color)
+	case f.concurrency < 0:
+		return fmt.Errorf("--concurrency must not be negative")
+	case f.timeout < 0:
+		return fmt.Errorf("--timeout must not be negative")
+	case f.context < 0:
+		return fmt.Errorf("--context must not be negative")
+	case f.engine != "" && f.engine != "docker" && f.engine != "podman":
+		return fmt.Errorf("invalid --engine %q: use docker or podman", f.engine)
+	}
+	return nil
+}
+
+func (a *App) errorf(format string, args ...any) {
+	fmt.Fprintf(a.Stderr, "gostest: "+format+"\n", args...)
+}
+
+func (a *App) usageError(err error) int {
+	a.errorf("%v", err)
+	fmt.Fprintln(a.Stderr, "Run 'gostest --help' for usage.")
+	return ExitUsage
 }
 
 // Run executes the command line args and returns the exit code.
 func (a *App) Run(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("gostest", flag.ContinueOnError)
-	fs.SetOutput(a.Stderr)
-	distros := fs.String("distros", "", "comma separated distributions")
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	f, rest, err := a.parseFlags(args)
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(a.Stdout, usage)
+		return ExitOK
 	}
-	if fs.NArg() == 0 {
-		fmt.Fprintln(a.Stderr, "usage: gostest [flags] command")
-		return ExitUsage
+	if err != nil {
+		return a.usageError(err)
 	}
-	reg, _ := distro.NewRegistry()
-	ds := reg.Defaults()
-	if *distros != "" {
-		var err error
-		if ds, err = reg.ParseList(*distros); err != nil {
-			fmt.Fprintln(a.Stderr, err)
-			return ExitUsage
+	if f.version {
+		fmt.Fprintf(a.Stdout, "gostest %s\n", a.Version)
+		return ExitOK
+	}
+	if err := f.validate(); err != nil {
+		return a.usageError(err)
+	}
+
+	workdir, err := a.workdir(f.workdir)
+	if err != nil {
+		return a.usageError(err)
+	}
+	cfg, err := a.loadConfig(f.configPath, workdir)
+	if err != nil {
+		return a.usageError(err)
+	}
+	reg, err := cfg.Registry()
+	if err != nil {
+		return a.usageError(err)
+	}
+	if f.list {
+		a.list(reg)
+		return ExitOK
+	}
+
+	if f.clearCache {
+		if err := a.clearCache(); err != nil {
+			a.errorf("%v", err)
+			return ExitRuntime
+		}
+		if len(rest) == 0 {
+			fmt.Fprintln(a.Stdout, "gostest: cache cleared")
+			return ExitOK
 		}
 	}
-	c, err := a.NewContainers("docker")
+
+	command := strings.Join(rest, " ")
+	if strings.TrimSpace(command) == "" {
+		return a.usageError(errors.New("no command given"))
+	}
+
+	opts, distros, err := a.options(f, cfg, reg, command, workdir)
 	if err != nil {
-		fmt.Fprintln(a.Stderr, err)
+		return a.usageError(err)
+	}
+
+	engineName := f.engine
+	if engineName == "" {
+		engineName = cfg.Engine
+	}
+	containers, err := a.containers(ctx, engineName)
+	if err != nil {
+		a.errorf("%v", err)
 		return ExitRuntime
 	}
-	e := &engine.Engine{Host: a.Host, HostShell: a.HostShell, Containers: c}
-	rep, err := e.Run(ctx, engine.Options{Command: strings.Join(fs.Args(), " ")}, ds)
+
+	e := &engine.Engine{Host: a.Host, HostShell: a.HostShell, Containers: containers}
+	e.Cache, opts.Fingerprint = a.openCache(workdir)
+
+	var prog *progress
+	if a.StderrTTY && !f.quiet {
+		prog = newProgress(a.Stderr, len(distros))
+		e.Progress = prog.update
+	}
+	rep, err := e.Run(ctx, opts, distros)
+	prog.finish()
+	if ctx.Err() != nil {
+		a.errorf("interrupted")
+		return ExitInterrupted
+	}
 	if err != nil {
-		fmt.Fprintln(a.Stderr, err)
+		a.errorf("%v", err)
 		return ExitRuntime
 	}
-	_ = report.Text(a.Stdout, rep, report.TextOptions{Context: report.DefaultContext})
+
+	if f.format == "json" {
+		err = report.JSON(a.Stdout, rep)
+	} else {
+		err = report.Text(a.Stdout, rep, report.TextOptions{
+			Color:   a.useColor(f.color),
+			Verbose: f.verbose,
+			Context: f.context,
+		})
+	}
+	if err != nil {
+		a.errorf("writing the report: %v", err)
+		return ExitRuntime
+	}
 	if !rep.OK() {
 		return ExitFailed
 	}
 	return ExitOK
 }
+
+func (a *App) workdir(flagValue string) (string, error) {
+	dir := flagValue
+	if dir == "" {
+		wd, err := a.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("finding the current directory: %w", err)
+		}
+		dir = wd
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("working directory: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("working directory %s is not a directory", abs)
+	}
+	return abs, nil
+}
+
+func (a *App) loadConfig(path, workdir string) (config.Config, error) {
+	if path == "" {
+		found, ok := config.Find(workdir)
+		if !ok {
+			return config.Config{}, nil
+		}
+		path = found
+	}
+	return config.Load(path)
+}
+
+// options combines flags, configuration and defaults; flags win over the
+// configuration, which wins over the defaults.
+func (a *App) options(f *flags, cfg config.Config, reg *distro.Registry, command, workdir string) (engine.Options, []distro.Distro, error) {
+	opts := engine.Options{
+		Command:     command,
+		Dir:         workdir,
+		Timeout:     DefaultTimeout,
+		Concurrency: DefaultConcurrency(),
+		NoCache:     f.noCache,
+		Compare:     compare.Options{IgnoreStderr: f.ignoreStderr || cfg.IgnoreStderr},
+	}
+
+	switch {
+	case f.set["timeout"]:
+		opts.Timeout = f.timeout
+	case cfg.Timeout.Duration > 0:
+		opts.Timeout = cfg.Timeout.Duration
+	}
+	switch {
+	case f.set["concurrency"]:
+		opts.Concurrency = f.concurrency
+	case cfg.Concurrency > 0:
+		opts.Concurrency = cfg.Concurrency
+	}
+
+	distros := reg.Defaults()
+	var err error
+	switch {
+	case f.set["distros"]:
+		distros, err = reg.ParseList(f.distros)
+	case len(cfg.Distros) > 0:
+		distros, err = reg.ParseList(strings.Join(cfg.Distros, ","))
+	}
+	if err != nil {
+		return engine.Options{}, nil, err
+	}
+
+	cfgPkgs, err := distro.ParsePackages(cfg.Packages)
+	if err != nil {
+		return engine.Options{}, nil, err
+	}
+	flagPkgs, err := distro.ParsePackages(f.pkgs)
+	if err != nil {
+		return engine.Options{}, nil, err
+	}
+	opts.Packages = cfgPkgs.Merge(flagPkgs)
+	return opts, distros, nil
+}
+
+func (a *App) containers(ctx context.Context, name string) (Containers, error) {
+	if name == "" {
+		for _, candidate := range []string{"docker", "podman"} {
+			if _, err := a.LookPath(candidate); err == nil {
+				name = candidate
+				break
+			}
+		}
+		if name == "" {
+			return nil, errors.New("no container engine found: install Docker or Podman")
+		}
+	}
+	c, err := a.NewContainers(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Available(ctx); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// openCache returns the result cache and the working directory fingerprint.
+// Caching is a speed-up only, so problems disable it with a warning.
+func (a *App) openCache(workdir string) (*cache.Store, string) {
+	dir, err := a.CacheDir()
+	if err != nil {
+		a.errorf("warning: result cache disabled: %v", err)
+		return nil, ""
+	}
+	store, err := cache.Open(dir)
+	if err != nil {
+		a.errorf("warning: result cache disabled: %v", err)
+		return nil, ""
+	}
+	limit := a.MaxFingerprintFiles
+	if limit <= 0 {
+		limit = DefaultMaxFingerprintFiles
+	}
+	fp, err := cache.Fingerprint(workdir, limit)
+	if errors.Is(err, cache.ErrTooManyFiles) {
+		a.errorf("warning: result cache disabled: %s has more than %d files; use --workdir to point at a smaller directory", workdir, limit)
+		return nil, ""
+	}
+	if err != nil {
+		a.errorf("warning: result cache disabled: %v", err)
+		return nil, ""
+	}
+	return store, fp
+}
+
+func (a *App) clearCache() error {
+	dir, err := a.CacheDir()
+	if err != nil {
+		return err
+	}
+	store, err := cache.Open(dir)
+	if err != nil {
+		return err
+	}
+	return store.Clear()
+}
+
+func (a *App) useColor(mode string) bool {
+	switch mode {
+	case "always":
+		return true
+	case "never":
+		return false
+	}
+	return a.StdoutTTY && a.Getenv("NO_COLOR") == "" && a.Getenv("TERM") != "dumb"
+}
+
+func (a *App) list(reg *distro.Registry) {
+	defaults := map[string]bool{}
+	for _, d := range reg.Defaults() {
+		defaults[d.Name] = true
+	}
+	all := reg.All()
+	sort.Slice(all, func(i, j int) bool { return all[i].Name < all[j].Name })
+	fmt.Fprintf(a.Stdout, "%-12s %-32s %-8s %s\n", "NAME", "IMAGE", "PACKAGES", "DEFAULT")
+	for _, d := range all {
+		mark := ""
+		if defaults[d.Name] {
+			mark = "*"
+		}
+		fmt.Fprintf(a.Stdout, "%-12s %-32s %-8s %s\n", d.Name, d.Image, d.PackageManager, mark)
+	}
+	fmt.Fprintln(a.Stdout, "\nAny distro accepts a tag, e.g. ubuntu:22.04 or alpine:3.18.")
+}
+
+// progress shows a single, continuously rewritten status line on a
+// terminal while distributions are being prepared and run.
+type progress struct {
+	w      io.Writer
+	total  int
+	done   int
+	stages map[string]engine.Stage
+}
+
+func newProgress(w io.Writer, total int) *progress {
+	return &progress{w: w, total: total, stages: map[string]engine.Stage{}}
+}
+
+func (p *progress) update(ev engine.Event) {
+	if ev.Stage == engine.StageDone {
+		p.done++
+		delete(p.stages, ev.Distro)
+	} else {
+		p.stages[ev.Distro] = ev.Stage
+	}
+	var active []string
+	for name, stage := range p.stages {
+		active = append(active, name+" ("+string(stage)+")")
+	}
+	sort.Strings(active)
+	fmt.Fprintf(p.w, "\r\x1b[K[%d/%d] %s", p.done, p.total, strings.Join(active, ", "))
+}
+
+func (p *progress) finish() {
+	if p != nil {
+		fmt.Fprint(p.w, "\r\x1b[K")
+	}
+}
+
+const usage = `Usage: gostest [flags] [--] command [args...]
+
+Run a shell command on this machine and, in parallel, inside several Linux
+distributions; compare every result with the local one and explain why it
+differs.
+
+Examples:
+  gostest 'if [[ $SHELL == *bash ]]; then echo bash; fi'
+  gostest -d alpine,ubuntu:22.04 -p curl ./install.sh
+  gostest -p alpine=bash,fedora=which --format json 'my-tool --version'
+
+Flags:
+  -d, --distros LIST      comma separated distributions
+                          (default: alpine,archlinux,debian,fedora,ubuntu)
+  -p, --pkg SPEC          packages to install: "curl" everywhere or
+                          "alpine=bash" in one distro; repeatable, comma separated
+  -j, --concurrency N     distributions processed at once (default: CPUs)
+  -t, --timeout DURATION  timeout of every run, 0 disables it (default: 2m)
+      --ignore-stderr     compare only stdout and exit codes
+      --engine NAME       docker or podman (default: auto-detect)
+      --workdir DIR       working directory, mounted read-only into the
+                          containers (default: current directory)
+      --config FILE       configuration file (default: nearest .gostest.json)
+      --no-cache          ignore cached results and rebuild images
+      --clear-cache       remove cached results
+      --format FORMAT     text or json (default: text)
+      --color WHEN        auto, always or never (default: auto)
+      --context N         unchanged lines shown around changes (default: 3)
+  -v, --verbose           show the full output of every run
+  -q, --quiet             do not show progress
+      --list              list the known distributions
+      --version           print the version
+  -h, --help              show this help
+
+Exit codes:
+  0    every distribution matches the reference
+  1    at least one distribution differs or could not be run
+  2    invalid usage or configuration
+  3    the reference or the container engine could not be run
+  130  interrupted
+`
