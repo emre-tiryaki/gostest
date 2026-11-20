@@ -13,3 +13,6 @@ coverage.*
 .vscode/
 *.swp
 .DS_Store
+
+# Graphify-out
+/graphify-out/
