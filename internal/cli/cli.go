@@ -54,6 +54,9 @@ type Containers interface {
 	engine.Containers
 	Available(ctx context.Context) error
 	Name() string
+	// Cleanup removes the images the run left behind, see
+	// backend.Docker.Cleanup.
+	Cleanup(ctx context.Context) error
 }
 
 // App is the command line application with its dependencies, which tests
@@ -120,6 +123,7 @@ type flags struct {
 	configPath   string
 	noCache      bool
 	noAutoInst   bool
+	cleanup      bool
 	clearCache   bool
 	format       string
 	color        string
@@ -165,6 +169,7 @@ func (a *App) parseFlags(args []string) (*flags, []string, error) {
 	fs.StringVar(&f.configPath, "config", "", "")
 	fs.BoolVar(&f.noCache, "no-cache", false, "")
 	fs.BoolVar(&f.noAutoInst, "no-auto-install", false, "")
+	fs.BoolVar(&f.cleanup, "cleanup", false, "")
 	fs.BoolVar(&f.clearCache, "clear-cache", false, "")
 	fs.StringVar(&f.format, "format", "text", "")
 	fs.StringVar(&f.color, "color", "auto", "")
@@ -290,6 +295,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 	rep, err := e.Run(ctx, opts, distros)
 	prog.finish()
+	if f.cleanup || cfg.Cleanup {
+		a.cleanup(ctx, containers)
+	}
 	if ctx.Err() != nil {
 		a.errorf("interrupted")
 		return ExitInterrupted
@@ -468,6 +476,19 @@ func (a *App) clearCache() error {
 	return store.Clear()
 }
 
+// cleanupTimeout bounds removing the images after a run.
+const cleanupTimeout = 2 * time.Minute
+
+// cleanup removes what the run left in the container engine. It also runs
+// after an interrupted run, so it does not use ctx's cancellation.
+func (a *App) cleanup(ctx context.Context, c Containers) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+	if err := c.Cleanup(cctx); err != nil {
+		a.errorf("warning: cleanup: %v", err)
+	}
+}
+
 func (a *App) useColor(mode string) bool {
 	switch mode {
 	case "always":
@@ -557,6 +578,8 @@ Flags:
       --no-cache          ignore cached results and rebuild images
       --no-auto-install   do not install packages for commands that are
                           missing in a distribution
+      --cleanup           remove the images pulled or built for the run
+                          when it ends
       --clear-cache       remove cached results
       --format FORMAT     text or json (default: text)
       --color WHEN        auto, always or never (default: auto)

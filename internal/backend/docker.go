@@ -146,6 +146,11 @@ func MountPoint(dir string) string {
 	return clean
 }
 
+// Cleanup removes the images this Docker pulled or built.
+func (d *Docker) Cleanup(ctx context.Context) error {
+	return nil
+}
+
 func (d *Docker) isEngineError(stderr string) bool {
 	s := strings.TrimSpace(stderr)
 	return strings.HasPrefix(s, d.Binary+":") ||

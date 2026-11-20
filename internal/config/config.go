@@ -67,6 +67,8 @@ type Config struct {
 	StrictOrder bool `json:"strict_order"`
 	// NoAutoInstall disables installing missing commands automatically.
 	NoAutoInstall bool `json:"no_auto_install"`
+	// Cleanup removes the images pulled or built for a run when it ends.
+	Cleanup bool `json:"cleanup"`
 }
 
 // Load reads and validates the configuration file at path.

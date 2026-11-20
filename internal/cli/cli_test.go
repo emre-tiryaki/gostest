@@ -69,6 +69,7 @@ type fakeContainers struct {
 
 func (c *fakeContainers) Name() string                    { return c.name }
 func (c *fakeContainers) Available(context.Context) error { return c.availErr }
+func (c *fakeContainers) Cleanup(context.Context) error   { return nil }
 
 func (c *fakeContainers) Prepare(_ context.Context, d distro.Distro, pkgs []string, rebuild bool) (backend.Environment, error) {
 	c.mu.Lock()
