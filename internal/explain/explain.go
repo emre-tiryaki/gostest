@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/emre-tiryaki/gostest/internal/backend"
 	"github.com/emre-tiryaki/gostest/internal/compare"
+	"github.com/emre-tiryaki/gostest/internal/distro"
 )
 
 // Kind classifies a reason.
@@ -55,6 +57,9 @@ type Context struct {
 	// HostLocale is the collation locale of the host, e.g. "en_US.UTF-8";
 	// empty when none is set.
 	HostLocale string
+	// NotProvided lists commands that were installed automatically
+	// without success because no package provides them.
+	NotProvided []string
 }
 
 // MaxCauses bounds the number of causes derived from stderr.
@@ -243,14 +248,26 @@ func diagnose(line string, c Context, busybox bool) (Reason, bool) {
 }
 
 // MissingCommands returns the commands that got reports as not found while
-// the reference does not, in order of appearance: the candidates for an
-// automatic installation.
+// the reference does not, without duplicates and in order of appearance:
+// the candidates for installing automatically. A missing shebang
+// interpreter counts by its base name (/bin/bash -> bash). Shell keywords
+// such as [[, paths and names that are not safe to look up are left out.
 func MissingCommands(ref, got backend.Result) []string {
 	var out []string
+	add := func(name string) {
+		if _, bashism := bashisms[name]; bashism || !distro.ValidCommandName(name) || slices.Contains(out, name) {
+			return
+		}
+		out = append(out, name)
+	}
 	for _, line := range newLines(ref.Stderr, got.Stderr) {
-		for _, re := range []*regexp.Regexp{reCmdNotFound, reNotFound} {
+		if m := reBadInterpreter.FindStringSubmatch(line); m != nil {
+			add(path.Base(m[2]))
+			continue
+		}
+		for _, re := range []*regexp.Regexp{reEnvMissing, reWhich, reZshNotFound, reCmdNotFound, reNotFound} {
 			if m := re.FindStringSubmatch(line); m != nil {
-				out = append(out, m[1])
+				add(m[1])
 				break
 			}
 		}
@@ -268,6 +285,9 @@ func notFound(name string, c Context) Reason {
 	distro := c.Distro
 	if distro == "" {
 		distro = "<distro>"
+	}
+	if slices.Contains(c.NotProvided, name) {
+		return Reason{KindMissingCommand, fmt.Sprintf("`%s` is not installed here and no package providing it was found; add its package with --pkg %s=<package>", name, distro)}
 	}
 	return Reason{KindMissingCommand, fmt.Sprintf("`%s` is not installed here; add its package with --pkg %s=<package>", name, distro)}
 }

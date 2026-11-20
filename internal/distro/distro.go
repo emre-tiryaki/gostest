@@ -279,12 +279,28 @@ func ProvideScript(pm PackageManager, cmds []string) (string, error) {
 		}
 		quoted[i] = "'" + c + "'"
 	}
-	list := strings.Join(quoted, " ")
+	// Each command is installed on its own so that one without a
+	// package does not prevent the others from being installed.
+	loop := func(install string) string {
+		return "for c in " + strings.Join(quoted, " ") + "; do " + install + " || true; done"
+	}
 	switch pm {
 	case APK:
-		return "for c in " + list + `; do apk add --no-cache "cmd:$c" || true; done`, nil
-	default:
-		return "", fmt.Errorf("installing missing commands is not supported with %s", pm)
+		// apk resolves the providers of a command through cmd:<name>.
+		return loop(`apk add --no-cache "cmd:$c"`), nil
+	case APT:
+		// Without apt-file there is no command index: try the
+		// package of the same name.
+		return "apt-get update && { " + loop(`DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$c"`) + "; rm -rf /var/lib/apt/lists/*; }", nil
+	case DNF:
+		// dnf resolves file paths to the packages that own them.
+		return loop(`dnf install -y "/usr/bin/$c"`) + "; dnf clean all", nil
+	case Pacman:
+		return "pacman -Syu --noconfirm && " + loop(`pacman -S --noconfirm --needed "$c"`), nil
+	case Zypper:
+		return "zypper --non-interactive refresh && { " + loop(`zypper --non-interactive install --no-recommends "/usr/bin/$c"`) + "; zypper clean --all; }", nil
+	default: // Emerge
+		return "(emerge-webrsync --quiet || emerge --sync --quiet) && " + loop(`emerge --quiet --noreplace "$c"`), nil
 	}
 }
 

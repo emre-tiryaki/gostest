@@ -255,6 +255,7 @@ type (
 		ImageID  string   `json:"image_id,omitempty"`
 		Shell    string   `json:"shell,omitempty"`
 		Packages []string `json:"packages,omitempty"`
+		Provided []string `json:"provided,omitempty"`
 	}
 	jsonOutcome struct {
 		Distro      distro.Distro       `json:"distro"`
@@ -296,7 +297,7 @@ func JSON(w io.Writer, rep engine.Report) error {
 			res := toJSONResult(o.Result)
 			cmp := o.Comparison
 			jo.Result, jo.Comparison = &res, &cmp
-			jo.Environment = &jsonEnv{Image: o.Env.Image, ImageID: o.Env.ImageID, Shell: o.Env.Shell, Packages: o.Env.Packages}
+			jo.Environment = &jsonEnv{Image: o.Env.Image, ImageID: o.Env.ImageID, Shell: o.Env.Shell, Packages: o.Env.Packages, Provided: o.Env.Provided}
 		}
 		doc.Outcomes = append(doc.Outcomes, jo)
 	}

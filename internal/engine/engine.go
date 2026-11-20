@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -60,9 +61,15 @@ type Options struct {
 	// Packages are installed into the distributions before running.
 	Packages distro.Packages
 	// AutoInstall installs packages for commands that are missing in a
-	// distribution but not on the host, and runs the command again.
+	// distribution but not on the host, and runs the command again, for
+	// at most MaxInstallRounds rounds.
 	AutoInstall bool
 }
+
+// MaxInstallRounds bounds how often missing commands are installed for one
+// distribution: a command found in one round may need others that only
+// show up once it runs.
+const MaxInstallRounds = 3
 
 // Reference is the host run every distribution is compared with.
 type Reference struct {
@@ -220,33 +227,11 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 	}
 	o.Env = env
 
-	cacheable := e.Cache != nil && (opts.Dir == "" || opts.Fingerprint != "")
-	key := cacheKey(opts, env)
-	if cacheable && !opts.NoCache {
-		var cached backend.Result
-		if ok, _ := e.Cache.Get(key, &cached); ok {
-			o.Result, o.Cached = cached, true
+	if err := e.execute(ctx, opts, spec, &o); err != nil {
+		if ctx.Err() != nil {
+			return o
 		}
-	}
-
-	if o.Cached {
-		e.emit(Event{Distro: d.Name, Stage: StageCached})
-	} else {
-		e.emit(Event{Distro: d.Name, Stage: StageRunning})
-		s := spec
-		s.Image = env.Image
-		res, err := e.Containers.Run(ctx, s)
-		if err != nil {
-			if ctx.Err() != nil {
-				return o
-			}
-			return fail(err)
-		}
-		o.Result = res
-		if cacheable && !res.TimedOut {
-			// A failed write only costs a re-run next time.
-			_ = e.Cache.Put(key, res)
-		}
+		return fail(err)
 	}
 
 	select {
@@ -257,25 +242,53 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 	if ref.err != nil {
 		return o
 	}
-	if opts.AutoInstall {
-		if missing := explain.MissingCommands(ref.result, o.Result); len(missing) > 0 {
-			e.emit(Event{Distro: d.Name, Stage: StageInstalling})
-			if env, err := e.Containers.Provide(ctx, o.Env, missing, opts.NoCache); err == nil {
-				o.Env = env
-				s := spec
-				s.Image = env.Image
-				if res, err := e.Containers.Run(ctx, s); err == nil {
-					o.Result = res
-				}
+
+	var tried, failed []string
+	var installErr error
+	for round := 0; opts.AutoInstall && round < MaxInstallRounds; round++ {
+		var missing []string
+		for _, c := range explain.MissingCommands(ref.result, o.Result) {
+			if !slices.Contains(tried, c) {
+				missing = append(missing, c)
 			}
 		}
+		if len(missing) == 0 {
+			break
+		}
+		tried = append(tried, missing...)
+		e.emit(Event{Distro: d.Name, Stage: StageInstalling})
+		next, err := e.Containers.Provide(ctx, o.Env, missing, opts.NoCache)
+		if err != nil {
+			if ctx.Err() != nil {
+				return o
+			}
+			failed, installErr = missing, err
+			break
+		}
+		if len(next.Provided) == len(o.Env.Provided) {
+			// Nothing new is available: running again would not help.
+			break
+		}
+		o.Env = next
+		if err := e.execute(ctx, opts, spec, &o); err != nil {
+			if ctx.Err() != nil {
+				return o
+			}
+			return fail(err)
+		}
 	}
+
 	o.Comparison = compare.Compare(ref.result, o.Result, opts.Compare)
 	ec := explain.Context{
 		Distro:     d.Name,
-		Shell:      env.Shell,
+		Shell:      o.Env.Shell,
 		RefShell:   e.HostShell,
 		HostLocale: e.HostLocale,
+	}
+	for _, c := range tried {
+		if !slices.Contains(o.Env.Provided, c) && !slices.Contains(failed, c) {
+			ec.NotProvided = append(ec.NotProvided, c)
+		}
 	}
 	if o.Comparison.Match() {
 		o.Status = Pass
@@ -283,9 +296,64 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		o.Status = Fail
 		o.Reasons = explain.Explain(ref.result, o.Result, o.Comparison, ec)
 	}
-	o.Notes = explain.Notes(o.Comparison, ec)
+	o.Notes = append(installNotes(o.Env.Provided, failed, installErr), explain.Notes(o.Comparison, ec)...)
 	e.emit(Event{Distro: d.Name, Stage: StageDone, Status: o.Status})
 	return o
+}
+
+// execute sets o.Result to the result of running spec in o.Env, from the
+// cache when possible.
+func (e *Engine) execute(ctx context.Context, opts Options, spec backend.Spec, o *Outcome) error {
+	cacheable := e.Cache != nil && (opts.Dir == "" || opts.Fingerprint != "")
+	key := cacheKey(opts, o.Env)
+	o.Cached = false
+	if cacheable && !opts.NoCache {
+		var cached backend.Result
+		if ok, _ := e.Cache.Get(key, &cached); ok {
+			o.Result, o.Cached = cached, true
+			e.emit(Event{Distro: o.Distro.Name, Stage: StageCached})
+			return nil
+		}
+	}
+
+	e.emit(Event{Distro: o.Distro.Name, Stage: StageRunning})
+	spec.Image = o.Env.Image
+	res, err := e.Containers.Run(ctx, spec)
+	if err != nil {
+		return err
+	}
+	o.Result = res
+	if cacheable && !res.TimedOut {
+		// A failed write only costs a re-run next time.
+		_ = e.Cache.Put(key, res)
+	}
+	return nil
+}
+
+// installNotes describes what the automatic installation did.
+func installNotes(provided, failed []string, err error) []explain.Reason {
+	var out []explain.Reason
+	if len(provided) > 0 {
+		out = append(out, explain.Reason{Kind: explain.KindInstalled, Message: "installed automatically because they were missing here: " + commandList(provided)})
+	}
+	if err != nil {
+		// Notes are one line: keep the end of the build output.
+		lines := strings.Split(strings.TrimSpace(err.Error()), "\n")
+		if len(lines) > 3 {
+			lines = append(lines[:1], lines[len(lines)-2:]...)
+		}
+		msg := strings.Join(lines, " / ")
+		out = append(out, explain.Reason{Kind: explain.KindInstalled, Message: fmt.Sprintf("could not install %s automatically: %s", commandList(failed), msg)})
+	}
+	return out
+}
+
+func commandList(cmds []string) string {
+	quoted := make([]string, len(cmds))
+	for i, c := range cmds {
+		quoted[i] = "`" + c + "`"
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // cacheKey identifies a container result: the exact image, command,
