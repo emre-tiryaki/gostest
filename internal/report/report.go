@@ -262,6 +262,7 @@ type (
 		Result      *jsonResult         `json:"result,omitempty"`
 		Comparison  *compare.Comparison `json:"comparison,omitempty"`
 		Reasons     []explain.Reason    `json:"reasons,omitempty"`
+		Notes       []explain.Reason    `json:"notes,omitempty"`
 	}
 )
 
@@ -287,7 +288,7 @@ func JSON(w io.Writer, rep engine.Report) error {
 		Outcomes:  make([]jsonOutcome, 0, len(rep.Outcomes)),
 	}
 	for _, o := range rep.Outcomes {
-		jo := jsonOutcome{Distro: o.Distro, Status: o.Status, Error: o.Error, Cached: o.Cached, Reasons: o.Reasons}
+		jo := jsonOutcome{Distro: o.Distro, Status: o.Status, Error: o.Error, Cached: o.Cached, Reasons: o.Reasons, Notes: o.Notes}
 		if o.Status != engine.Error {
 			res := toJSONResult(o.Result)
 			cmp := o.Comparison

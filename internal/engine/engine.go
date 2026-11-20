@@ -73,6 +73,8 @@ type Outcome struct {
 	Error      string              `json:"error,omitempty"`
 	Comparison compare.Comparison  `json:"comparison"`
 	Reasons    []explain.Reason    `json:"reasons,omitempty"`
+	// Notes are remarks that do not affect the status.
+	Notes []explain.Reason `json:"notes,omitempty"`
 }
 
 // Report is the outcome of a whole run.
@@ -107,6 +109,8 @@ type Engine struct {
 	Host backend.Runner
 	// HostShell is what /bin/sh is on the host.
 	HostShell string
+	// HostLocale is the collation locale of the host reference run.
+	HostLocale string
 	// Containers prepares and runs the distributions.
 	Containers Containers
 	// Cache stores container results; nil disables caching.
@@ -246,16 +250,19 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		return o
 	}
 	o.Comparison = compare.Compare(ref.result, o.Result, opts.Compare)
+	ec := explain.Context{
+		Distro:     d.Name,
+		Shell:      env.Shell,
+		RefShell:   e.HostShell,
+		HostLocale: e.HostLocale,
+	}
 	if o.Comparison.Match() {
 		o.Status = Pass
 	} else {
 		o.Status = Fail
-		o.Reasons = explain.Explain(ref.result, o.Result, o.Comparison, explain.Context{
-			Distro:   d.Name,
-			Shell:    env.Shell,
-			RefShell: e.HostShell,
-		})
+		o.Reasons = explain.Explain(ref.result, o.Result, o.Comparison, ec)
 	}
+	o.Notes = explain.Notes(o.Comparison, ec)
 	e.emit(Event{Distro: d.Name, Stage: StageDone, Status: o.Status})
 	return o
 }

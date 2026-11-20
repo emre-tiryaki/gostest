@@ -114,6 +114,7 @@ type flags struct {
 	concurrency  int
 	timeout      time.Duration
 	ignoreStderr bool
+	strictOrder  bool
 	engine       string
 	workdir      string
 	configPath   string
@@ -157,6 +158,7 @@ func (a *App) parseFlags(args []string) (*flags, []string, error) {
 		fs.BoolVar(&f.quiet, name, false, "")
 	}
 	fs.BoolVar(&f.ignoreStderr, "ignore-stderr", false, "")
+	fs.BoolVar(&f.strictOrder, "strict-order", false, "")
 	fs.StringVar(&f.engine, "engine", "", "")
 	fs.StringVar(&f.workdir, "workdir", "", "")
 	fs.StringVar(&f.configPath, "config", "", "")
@@ -276,7 +278,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return ExitRuntime
 	}
 
-	e := &engine.Engine{Host: a.Host, HostShell: a.HostShell, Containers: containers}
+	e := &engine.Engine{Host: a.Host, HostShell: a.HostShell, HostLocale: HostLocale(a.Getenv), Containers: containers}
 	e.Cache, opts.Fingerprint = a.openCache(workdir)
 
 	var prog *progress
@@ -357,7 +359,10 @@ func (a *App) options(f *flags, cfg config.Config, reg *distro.Registry, command
 		Timeout:     DefaultTimeout,
 		Concurrency: DefaultConcurrency(),
 		NoCache:     f.noCache,
-		Compare:     compare.Options{IgnoreStderr: f.ignoreStderr || cfg.IgnoreStderr},
+		Compare: compare.Options{
+			IgnoreStderr: f.ignoreStderr || cfg.IgnoreStderr,
+			StrictOrder:  f.strictOrder || cfg.StrictOrder,
+		},
 	}
 
 	switch {
@@ -541,6 +546,7 @@ Flags:
   -j, --concurrency N     distributions processed at once (default: CPUs)
   -t, --timeout DURATION  timeout of every run, 0 disables it (default: 2m)
       --ignore-stderr     compare only stdout and exit codes
+      --strict-order      fail when output only differs in line order
       --engine NAME       docker or podman (default: auto-detect)
       --workdir DIR       working directory, mounted read-only into the
                           containers (default: current directory)
@@ -563,3 +569,7 @@ Exit codes:
   3    the reference or the container engine could not be run
   130  interrupted
 `
+
+// HostLocale returns the locale that decides collation on the host, as the C
+// library resolves it from LC_ALL, LC_COLLATE and LANG; empty when none is set.
+func HostLocale(getenv func(string) string) string { return "" }

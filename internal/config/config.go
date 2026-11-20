@@ -63,6 +63,8 @@ type Config struct {
 	Engine string `json:"engine"`
 	// IgnoreStderr compares only stdout and exit codes.
 	IgnoreStderr bool `json:"ignore_stderr"`
+	// StrictOrder fails streams whose lines only differ in order.
+	StrictOrder bool `json:"strict_order"`
 }
 
 // Load reads and validates the configuration file at path.

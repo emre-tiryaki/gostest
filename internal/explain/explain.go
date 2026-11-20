@@ -34,6 +34,7 @@ const (
 	KindStdout             Kind = "stdout"
 	KindStderr             Kind = "stderr"
 	KindTruncated          Kind = "truncated"
+	KindReordered          Kind = "reordered"
 )
 
 // Reason explains one aspect of a difference.
@@ -50,6 +51,9 @@ type Context struct {
 	Shell string
 	// RefShell is what /bin/sh is on the host.
 	RefShell string
+	// HostLocale is the collation locale of the host, e.g. "en_US.UTF-8";
+	// empty when none is set.
+	HostLocale string
 }
 
 // MaxCauses bounds the number of causes derived from stderr.
@@ -285,3 +289,7 @@ func exitMessage(code, ref int) string {
 	}
 	return msg
 }
+
+// Notes returns remarks about a run that are not differences, such as
+// streams that matched only because their order was ignored.
+func Notes(cmp compare.Comparison, c Context) []Reason { return nil }

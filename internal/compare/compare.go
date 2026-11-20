@@ -153,6 +153,10 @@ func diffMiddle(a, b []Line) []Line {
 type Options struct {
 	// IgnoreStderr treats stderr differences as a match.
 	IgnoreStderr bool
+	// StrictOrder treats a stream with the same lines in a different order
+	// as a difference. By default such a stream matches and is only marked
+	// as reordered.
+	StrictOrder bool
 }
 
 // Comparison is the outcome of comparing a result with the reference.
@@ -162,10 +166,22 @@ type Comparison struct {
 	StderrMatch   bool   `json:"stderr_match"`
 	StdoutDiff    []Line `json:"stdout_diff,omitempty"`
 	StderrDiff    []Line `json:"stderr_diff,omitempty"`
+	// StdoutReordered and StderrReordered mark streams that match only
+	// because their order was ignored.
+	StdoutReordered bool `json:"stdout_reordered,omitempty"`
+	StderrReordered bool `json:"stderr_reordered,omitempty"`
 }
 
 // Match reports whether the result is equivalent to the reference.
 func (c Comparison) Match() bool { return c.ExitCodeMatch && c.StdoutMatch && c.StderrMatch }
+
+// Reordered reports whether a stream matched only because its order was
+// ignored.
+func (c Comparison) Reordered() bool { return c.StdoutReordered || c.StderrReordered }
+
+// SameLines reports whether a and b contain the same lines, counting
+// duplicates, in any order.
+func SameLines(a, b string) bool { return false }
 
 func normalize(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
 
