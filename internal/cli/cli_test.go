@@ -17,6 +17,7 @@ import (
 
 	"github.com/emre-tiryaki/gostest/internal/backend"
 	"github.com/emre-tiryaki/gostest/internal/distro"
+	"github.com/emre-tiryaki/gostest/internal/engine"
 )
 
 type fakeHost struct {
@@ -692,6 +693,47 @@ func TestProgress(t *testing.T) {
 	expectExit(t, h, h.run("-d", "alpine", "x"), ExitOK)
 	if h.stderr.Len() != 0 {
 		t.Fatalf("no progress without a terminal: %q", h.stderr)
+	}
+}
+
+func TestProgressBlock(t *testing.T) {
+	var buf bytes.Buffer
+	p := newProgress(&buf, []string{"alpine", "debian"})
+	p.update(engine.Event{Distro: "alpine", Stage: engine.StagePreparing})
+	first := buf.String()
+	for _, want := range []string{"alpine", "preparing", "debian", "waiting", "[0/2]"} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("first frame lacks %q: %q", want, first)
+		}
+	}
+	if strings.Index(first, "alpine") > strings.Index(first, "debian") || strings.Index(first, "debian") > strings.Index(first, "[0/2]") {
+		t.Fatalf("lines must follow the distro order with the counter last: %q", first)
+	}
+	if strings.Contains(first, "\x1b[2A") {
+		t.Fatalf("first frame must not move the cursor up: %q", first)
+	}
+
+	buf.Reset()
+	p.update(engine.Event{Distro: "alpine", Stage: engine.StageDone, Status: engine.Pass})
+	second := buf.String()
+	if !strings.HasPrefix(second, "\x1b[2A\r") {
+		t.Fatalf("redraw must move up over the 3-line block: %q", second)
+	}
+	if !strings.Contains(second, "[1/2]") || !strings.Contains(second, "done PASS") {
+		t.Fatalf("done not shown: %q", second)
+	}
+
+	buf.Reset()
+	p.finish()
+	if got := buf.String(); got != "\x1b[2A\r\x1b[J" {
+		t.Fatalf("finish must erase the block, got %q", got)
+	}
+
+	buf.Reset()
+	(*progress)(nil).finish()
+	newProgress(&buf, []string{"a"}).finish()
+	if buf.Len() != 0 {
+		t.Fatalf("finish without a drawn block must print nothing: %q", buf.String())
 	}
 }
 
