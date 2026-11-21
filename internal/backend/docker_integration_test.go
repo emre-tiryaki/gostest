@@ -172,3 +172,46 @@ func TestIntegrationCleanupRemovesDerivedImages(t *testing.T) {
 		t.Fatalf("base image %s that existed before was removed (err %v)", alpine.Image, err)
 	}
 }
+
+func TestIntegrationMountsHostTool(t *testing.T) {
+	d := realDocker(t)
+	script := writeFile(t, "gostest-probe", "#!/bin/sh\necho \"probe on $(uname -s)\"\n", 0o755)
+	if kind, err := ClassifyHostTool(script); err != nil || kind != ToolScript {
+		t.Fatalf("ClassifyHostTool = %v, %v; want a script", kind, err)
+	}
+	mount := Mount{Source: script, Target: HostToolTarget + "/gostest-probe"}
+	debian := distro.Distro{Name: "debian", Image: "debian:latest", PackageManager: distro.APT}
+	for _, dist := range []distro.Distro{alpine, debian} {
+		t.Run(dist.Name, func(t *testing.T) {
+			env := prepare(t, d, dist, nil)
+			ctx := context.Background()
+
+			res, err := d.Run(ctx, Spec{Image: env.Image, Command: "gostest-probe"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.ExitCode != 127 || !strings.Contains(res.Stderr, "not found") {
+				t.Fatalf("without the mount the command should be missing: %+v", res)
+			}
+
+			res, err = d.Run(ctx, Spec{Image: env.Image, Command: "gostest-probe", Mounts: []Mount{mount}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.ExitCode != 0 || res.Stdout != "probe on Linux\n" {
+				t.Fatalf("mounted script did not run: %+v", res)
+			}
+
+			res, err = d.Run(ctx, Spec{Image: env.Image, Command: "echo changed > /usr/local/bin/gostest-probe", Mounts: []Mount{mount}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.ExitCode == 0 {
+				t.Errorf("the mount should be read-only: %+v", res)
+			}
+		})
+	}
+	if b, _ := os.ReadFile(script); !strings.Contains(string(b), "uname") {
+		t.Errorf("container modified the host script: %q", b)
+	}
+}

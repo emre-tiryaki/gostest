@@ -433,3 +433,44 @@ func TestJSONProvided(t *testing.T) {
 		t.Fatalf("environment = %+v, want packages and provided commands", env)
 	}
 }
+
+func TestJSONMounts(t *testing.T) {
+	rep := engine.Report{
+		Command: "mytool",
+		Outcomes: []engine.Outcome{
+			{
+				Distro: distro.Distro{Name: "alpine"},
+				Status: engine.Pass,
+				Env: backend.Environment{Image: "alpine:latest", Mounts: []backend.Mount{
+					{Source: "/home/u/bin/mytool", Target: "/usr/local/bin/mytool", Hash: "abc"},
+				}},
+			},
+			{Distro: distro.Distro{Name: "debian"}, Status: engine.Pass, Env: backend.Environment{Image: "debian:latest"}},
+		},
+	}
+	var b bytes.Buffer
+	if err := JSON(&b, rep); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Outcomes []struct {
+			Environment map[string]json.RawMessage `json:"environment"`
+		} `json:"outcomes"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var mounts []struct {
+		Source string `json:"source"`
+		Target string `json:"target"`
+	}
+	if err := json.Unmarshal(doc.Outcomes[0].Environment["mounts"], &mounts); err != nil {
+		t.Fatalf("environment.mounts: %v\n%s", err, b.String())
+	}
+	if len(mounts) != 1 || mounts[0].Source != "/home/u/bin/mytool" || mounts[0].Target != "/usr/local/bin/mytool" {
+		t.Errorf("mounts = %+v", mounts)
+	}
+	if _, ok := doc.Outcomes[1].Environment["mounts"]; ok {
+		t.Errorf("an environment without mounts should omit them:\n%s", b.String())
+	}
+}

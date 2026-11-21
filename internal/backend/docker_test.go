@@ -1046,3 +1046,60 @@ func TestCleanupReportsFailuresAndContinues(t *testing.T) {
 		t.Fatalf("removed %v: the other images should still be removed", got)
 	}
 }
+
+func TestDockerRunMountsHostTools(t *testing.T) {
+	f := newFakeEngine()
+	d := newTestDocker(f)
+	spec := Spec{Command: "a; b", Image: "alpine", Dir: "/home/u/proj", Mounts: []Mount{
+		{Source: "/home/u/.local/bin/a", Target: "/usr/local/bin/a", Hash: "1"},
+		{Source: "/opt/b/b.sh", Target: "/usr/local/bin/b", Hash: "2"},
+	}}
+	if _, err := d.Run(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	args := f.callsTo("run")[0]
+	var volumes []string
+	for i, a := range args {
+		if a == "-v" && i+1 < len(args) {
+			volumes = append(volumes, args[i+1])
+		}
+	}
+	want := []string{
+		"/home/u/proj:/home/u/proj:ro",
+		"/home/u/.local/bin/a:/usr/local/bin/a:ro",
+		"/opt/b/b.sh:/usr/local/bin/b:ro",
+	}
+	if !slices.Equal(volumes, want) {
+		t.Errorf("volumes = %v, want %v", volumes, want)
+	}
+	if i, j := slices.Index(args, "--entrypoint"), slices.Index(args, want[2]); j < 0 || j > i {
+		t.Errorf("mounts must come before the image: %v", args)
+	}
+}
+
+func TestDockerRunRejectsMountSourcesWithColon(t *testing.T) {
+	f := newFakeEngine()
+	d := newTestDocker(f)
+	spec := Spec{Command: "a", Image: "alpine", Mounts: []Mount{{Source: "/home/u/a:b/a", Target: "/usr/local/bin/a"}}}
+	if _, err := d.Run(context.Background(), spec); err == nil || !strings.Contains(err.Error(), ":") {
+		t.Fatalf("err = %v, want an error about ':'", err)
+	}
+	if len(f.callsTo("run")) != 0 {
+		t.Error("docker run must not be called")
+	}
+}
+
+func TestProvideKeepsMounts(t *testing.T) {
+	f := newFakeEngine()
+	f.run = availableRun(f, "jq")
+	d := newTestDocker(f)
+	env := alpineEnv(f)
+	env.Mounts = []Mount{{Source: "/h/tool", Target: "/usr/local/bin/tool", Hash: "x"}}
+	got, err := d.Provide(context.Background(), env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Mounts, env.Mounts) {
+		t.Errorf("Mounts = %v, want %v", got.Mounts, env.Mounts)
+	}
+}

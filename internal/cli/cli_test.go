@@ -123,7 +123,11 @@ func (c *fakeContainers) Run(ctx context.Context, spec backend.Spec) (backend.Re
 	c.runs = append(c.runs, spec)
 	c.active++
 	c.peak = max(c.peak, c.active)
-	res, ok := c.results[strings.TrimPrefix(spec.Image, "img-")]
+	key := strings.TrimPrefix(spec.Image, "img-")
+	for _, m := range spec.Mounts {
+		key += "@" + filepath.Base(m.Target)
+	}
+	res, ok := c.results[key]
 	if !ok {
 		res = backend.Result{Stdout: "ok\n"}
 	}
@@ -163,6 +167,8 @@ type harness struct {
 	env        map[string]string
 	wd         string
 	paths      map[string]bool // binaries found by LookPath
+	hostTools  map[string]bool // commands App.HostTool resolves
+	toolCalls  []string        // commands App.HostTool was asked for
 }
 
 func newHarness(t *testing.T) *harness {
@@ -175,6 +181,7 @@ func newHarness(t *testing.T) *harness {
 		env:        map[string]string{},
 		wd:         t.TempDir(),
 		paths:      map[string]bool{"docker": true},
+		hostTools:  map[string]bool{},
 	}
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	h.app = &App{
@@ -196,7 +203,14 @@ func newHarness(t *testing.T) *harness {
 		Getwd:    func() (string, error) { return h.wd, nil },
 		Getenv:   func(k string) string { return h.env[k] },
 		CacheDir: func() (string, error) { return cacheDir, nil },
-		Version:  "1.2.3",
+		HostTool: func(name string) (backend.Mount, bool) {
+			h.toolCalls = append(h.toolCalls, name)
+			if !h.hostTools[name] {
+				return backend.Mount{}, false
+			}
+			return backend.Mount{Source: "/home/u/bin/" + name, Target: backend.HostToolTarget + "/" + name, Hash: "h"}, true
+		},
+		Version: "1.2.3",
 	}
 	return h
 }
@@ -875,5 +889,137 @@ func TestCleanupInUsage(t *testing.T) {
 	h.run("--help")
 	if !strings.Contains(h.stdout.String()+h.stderr.String(), "--cleanup") {
 		t.Error("usage should document --cleanup")
+	}
+}
+
+func TestHostToolMounting(t *testing.T) {
+	setup := func() *harness {
+		h := newHarness(t)
+		h.hostTools["mytool"] = true
+		h.containers.results["alpine"] = backend.Result{Stderr: "sh: mytool: not found\n", ExitCode: 127}
+		h.containers.results["alpine@mytool"] = backend.Result{Stdout: "ok\n"}
+		return h
+	}
+
+	h := setup()
+	expectExit(t, h, h.run("-d", "alpine", "mytool"), ExitOK)
+	if !slices.Equal(h.toolCalls, []string{"mytool"}) {
+		t.Errorf("HostTool calls = %v, want [mytool]", h.toolCalls)
+	}
+	if h.containers.provideCount() != 0 {
+		t.Errorf("Provide called for a mounted tool: %v", h.containers.provides)
+	}
+	if !strings.Contains(h.stdout.String(), "mounted from the host") {
+		t.Errorf("the report should say mytool was mounted:\n%s", h.stdout.String())
+	}
+
+	h = setup()
+	expectExit(t, h, h.run("-d", "alpine", "--no-auto-install", "mytool"), ExitFailed)
+	if len(h.toolCalls) != 0 {
+		t.Errorf("--no-auto-install still mounted host tools: %v", h.toolCalls)
+	}
+
+	h = setup()
+	h.writeConfig(t, `{"no_auto_install": true}`)
+	expectExit(t, h, h.run("-d", "alpine", "mytool"), ExitFailed)
+	if len(h.toolCalls) != 0 {
+		t.Errorf("no_auto_install in the configuration still mounted host tools: %v", h.toolCalls)
+	}
+}
+
+func TestHostToolMountingInJSON(t *testing.T) {
+	h := newHarness(t)
+	h.hostTools["mytool"] = true
+	h.containers.results["alpine"] = backend.Result{Stderr: "sh: mytool: not found\n", ExitCode: 127}
+	h.containers.results["alpine@mytool"] = backend.Result{Stdout: "ok\n"}
+	expectExit(t, h, h.run("-d", "alpine", "--format", "json", "mytool"), ExitOK)
+	if !strings.Contains(h.stdout.String(), `"target": "/usr/local/bin/mytool"`) {
+		t.Errorf("JSON should list the mount:\n%s", h.stdout.String())
+	}
+}
+
+// lookIn returns a LookPath that finds the files in dir.
+func lookIn(dir string) func(string) (string, error) {
+	return func(name string) (string, error) {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err != nil {
+			return "", fmt.Errorf("%s: not found", name)
+		}
+		return p, nil
+	}
+}
+
+func TestHostToolResolver(t *testing.T) {
+	dir := t.TempDir()
+	content := "#!/bin/sh\necho mytool\n"
+	real := filepath.Join(t.TempDir(), "mytool.sh")
+	if err := os.WriteFile(real, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(dir, "mytool")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plain"), []byte("echo hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolve := HostToolResolver(lookIn(dir))
+
+	m, ok := resolve("mytool")
+	if !ok {
+		t.Fatal("a shebang script on the host should be resolved")
+	}
+	wantSource, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Source != wantSource {
+		t.Errorf("Source = %q, want the symlink target %q", m.Source, wantSource)
+	}
+	if m.Target != "/usr/local/bin/mytool" {
+		t.Errorf("Target = %q, want /usr/local/bin/mytool", m.Target)
+	}
+	if m.Hash == "" {
+		t.Error("Hash is empty")
+	}
+
+	if err := os.WriteFile(real, []byte(content+"echo edited\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if m2, _ := resolve("mytool"); m2.Hash == m.Hash {
+		t.Error("editing the script must change its hash")
+	}
+
+	if _, ok := resolve("missing"); ok {
+		t.Error("a command missing on the host must not be resolved")
+	}
+	if _, ok := resolve("plain"); ok {
+		t.Error("a file without a shebang must not be resolved")
+	}
+}
+
+func TestHostToolResolverSkipsDynamicBinaries(t *testing.T) {
+	sh, err := filepath.EvalSymlinks("/bin/sh")
+	if err != nil {
+		t.Skip(err)
+	}
+	if kind, err := backend.ClassifyHostTool(sh); err != nil || kind != backend.ToolUnsupported {
+		t.Skipf("/bin/sh is not a dynamic binary here (%v, %v)", kind, err)
+	}
+	resolve := HostToolResolver(func(string) (string, error) { return sh, nil })
+	if _, ok := resolve("sh"); ok {
+		t.Error("a dynamically linked binary must not be resolved")
+	}
+}
+
+func TestHostToolResolverRejectsColons(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a:b")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mytool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := HostToolResolver(lookIn(dir))("mytool"); ok {
+		t.Error("paths containing ':' cannot be mounted and must not be resolved")
 	}
 }

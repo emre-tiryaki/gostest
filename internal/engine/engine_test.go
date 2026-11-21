@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"reflect"
 	"slices"
 	"strings"
@@ -123,7 +124,7 @@ func (c *fakeContainers) Run(ctx context.Context, spec backend.Spec) (backend.Re
 	c.runs = append(c.runs, spec)
 	c.active++
 	c.peak = max(c.peak, c.active)
-	delay, res, err, block := c.delay[spec.Image], c.results[spec.Image], c.runErr[spec.Image], c.block
+	delay, res, err, block := c.delay[spec.Image], c.results[resultKey(spec)], c.runErr[spec.Image], c.block
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
@@ -140,6 +141,22 @@ func (c *fakeContainers) Run(ctx context.Context, spec backend.Spec) (backend.Re
 		return backend.Result{}, ctx.Err()
 	}
 	return res, err
+}
+
+// resultKey is the key of c.results for spec: its image, followed by
+// "@<command>" for every mounted host tool.
+func resultKey(spec backend.Spec) string {
+	key := spec.Image
+	for _, m := range spec.Mounts {
+		key += "@" + path.Base(m.Target)
+	}
+	return key
+}
+
+func (c *fakeContainers) lastRun() backend.Spec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.runs[len(c.runs)-1]
 }
 
 func (c *fakeContainers) runCount() int {
@@ -900,5 +917,277 @@ func TestAutoInstallCancelled(t *testing.T) {
 	}
 	if _, err := e.Run(ctx, Options{Command: "jq", AutoInstall: true}, distros("a")); !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
+// --- host tools ---
+
+// fakeHostTools resolves the commands in hashes to /host/bin/<name>.
+type fakeHostTools struct {
+	mu     sync.Mutex
+	hashes map[string]string // command -> content hash
+	calls  []string
+}
+
+func (h *fakeHostTools) resolve(name string) (backend.Mount, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, name)
+	hash, ok := h.hashes[name]
+	if !ok {
+		return backend.Mount{}, false
+	}
+	return backend.Mount{Source: "/host/bin/" + name, Target: backend.HostToolTarget + "/" + name, Hash: hash}, true
+}
+
+func (h *fakeHostTools) called() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.calls)
+}
+
+func hostToolEngine(host *fakeHost, c *fakeContainers, tools map[string]string) (*Engine, *fakeHostTools) {
+	ht := &fakeHostTools{hashes: tools}
+	e := newEngine(host, c)
+	e.HostTool = ht.resolve
+	return e, ht
+}
+
+func toolMount(name, hash string) backend.Mount {
+	return backend.Mount{Source: "/host/bin/" + name, Target: "/usr/local/bin/" + name, Hash: hash}
+}
+
+func TestHostToolMountedInsteadOfInstalled(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.0\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = backend.Result{Stdout: "1.0\n"}
+	c.provides["a"] = []string{"mytool"} // a package exists, but the host's version wins
+	e, ht := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+
+	rep := run(t, e, Options{Command: "mytool -V", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS after mounting mytool: %+v", o.Status, o)
+	}
+	if !slices.Equal(ht.called(), []string{"mytool"}) {
+		t.Errorf("HostTool calls = %v, want [mytool]", ht.called())
+	}
+	if calls := c.provided(); len(calls) != 0 {
+		t.Errorf("Provide called for a mounted command: %+v", calls)
+	}
+	want := []backend.Mount{toolMount("mytool", "h1")}
+	if got := c.lastRun(); got.Image != "a:latest" || !reflect.DeepEqual(got.Mounts, want) {
+		t.Errorf("re-run spec = %+v, want image a:latest with mounts %+v", got, want)
+	}
+	if !reflect.DeepEqual(o.Env.Mounts, want) || len(o.Env.Provided) != 0 {
+		t.Errorf("Env = %+v, want mounts %+v and nothing provided", o.Env, want)
+	}
+	if c.runCount() != 2 {
+		t.Errorf("runs = %d, want 2", c.runCount())
+	}
+	if !hasNote(o, explain.KindInstalled, "mounted from the host") || !hasNote(o, explain.KindInstalled, "`mytool`") {
+		t.Errorf("notes = %+v, want a note saying mytool was mounted from the host", o.Notes)
+	}
+	if hasNote(o, explain.KindInstalled, "installed automatically") {
+		t.Errorf("notes = %+v: nothing was installed", o.Notes)
+	}
+}
+
+func TestHostToolNotResolvedFallsBackToProvide(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.results["a:latest+jq"] = backend.Result{Stdout: "1.7\n"}
+	c.provides["a"] = []string{"jq"}
+	e, ht := hostToolEngine(host, c, nil)
+
+	rep := run(t, e, Options{Command: "jq --version", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS", o.Status)
+	}
+	if !slices.Equal(ht.called(), []string{"jq"}) {
+		t.Errorf("HostTool calls = %v, want [jq]", ht.called())
+	}
+	if calls := c.provided(); len(calls) != 1 || !slices.Equal(calls[0].cmds, []string{"jq"}) {
+		t.Errorf("Provide calls = %+v, want one for jq", calls)
+	}
+	if len(o.Env.Mounts) != 0 || len(c.lastRun().Mounts) != 0 {
+		t.Errorf("nothing should be mounted: env %+v, last run %+v", o.Env, c.lastRun())
+	}
+	if hasNote(o, explain.KindInstalled, "mounted") {
+		t.Errorf("notes = %+v: nothing was mounted", o.Notes)
+	}
+}
+
+func TestHostToolAndProvideInSameRound(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool", "jq")
+	c.results["a:latest+jq@mytool"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"jq", "mytool"}
+	e, _ := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+
+	rep := run(t, e, Options{Command: "mytool | jq", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS: %+v", o.Status, o)
+	}
+	calls := c.provided()
+	if len(calls) != 1 || !slices.Equal(calls[0].cmds, []string{"jq"}) || calls[0].image != "a:latest" {
+		t.Fatalf("Provide calls = %+v, want one for jq only", calls)
+	}
+	if c.runCount() != 2 {
+		t.Errorf("runs = %d, want 2: mounting and installing happen in one round", c.runCount())
+	}
+	if !slices.Equal(o.Env.Provided, []string{"jq"}) || !reflect.DeepEqual(o.Env.Mounts, []backend.Mount{toolMount("mytool", "h1")}) {
+		t.Errorf("Env = %+v", o.Env)
+	}
+	if !hasNote(o, explain.KindInstalled, "mounted from the host because they were missing here: `mytool`") {
+		t.Errorf("notes = %+v, want a mounted note for mytool", o.Notes)
+	}
+	if !hasNote(o, explain.KindInstalled, "installed automatically because they were missing here: `jq`") {
+		t.Errorf("notes = %+v, want an installed note for jq", o.Notes)
+	}
+}
+
+func TestHostToolThenInstallsItsInterpreter(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = backend.Result{Stderr: "env: can't execute 'bash': No such file or directory\n", ExitCode: 127}
+	c.results["a:latest+bash@mytool"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"bash"}
+	e, ht := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+
+	rep := run(t, e, Options{Command: "mytool", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS: %+v", o.Status, o)
+	}
+	if !slices.Equal(ht.called(), []string{"mytool", "bash"}) {
+		t.Errorf("HostTool calls = %v, want [mytool bash]", ht.called())
+	}
+	calls := c.provided()
+	if len(calls) != 1 || !slices.Equal(calls[0].cmds, []string{"bash"}) {
+		t.Fatalf("Provide calls = %+v, want one for bash", calls)
+	}
+	if !reflect.DeepEqual(o.Env.Mounts, []backend.Mount{toolMount("mytool", "h1")}) {
+		t.Errorf("mounts must survive Provide: %+v", o.Env)
+	}
+}
+
+func TestHostToolNilKeepsBehaviour(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = backend.Result{Stdout: "ok\n"}
+
+	rep := run(t, newEngine(host, c), Options{Command: "mytool", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Fail || len(o.Env.Mounts) != 0 {
+		t.Errorf("outcome = %+v, want FAIL without mounts", o)
+	}
+	if len(c.provided()) != 1 || c.runCount() != 1 {
+		t.Errorf("Provide calls = %+v, runs = %d; want one attempt and one run", c.provided(), c.runCount())
+	}
+}
+
+func TestHostToolNeedsAutoInstall(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = backend.Result{Stdout: "ok\n"}
+	e, ht := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+
+	rep := run(t, e, Options{Command: "mytool"}, distros("a"))
+	if rep.Outcomes[0].Status != Fail {
+		t.Errorf("status %s, want FAIL", rep.Outcomes[0].Status)
+	}
+	if len(ht.called()) != 0 || c.runCount() != 1 {
+		t.Errorf("HostTool calls = %v, runs = %d; want no mounting without AutoInstall", ht.called(), c.runCount())
+	}
+}
+
+func TestHostToolThatDoesNotHelpStops(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = notFoundResult("mytool")
+	e, ht := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+
+	rep := run(t, e, Options{Command: "mytool", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Fail {
+		t.Errorf("status %s, want FAIL", o.Status)
+	}
+	if len(ht.called()) != 1 || len(c.provided()) != 0 || c.runCount() != 2 {
+		t.Errorf("HostTool calls = %v, Provide calls = %+v, runs = %d; want one mount, no install and two runs",
+			ht.called(), c.provided(), c.runCount())
+	}
+	for _, r := range o.Reasons {
+		if strings.Contains(r.Message, "no package") {
+			t.Errorf("reason %q: no package was looked for", r.Message)
+		}
+	}
+}
+
+func TestHostToolProgressStages(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = backend.Result{Stdout: "ok\n"}
+	e, _ := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+	var stages []Stage
+	e.Progress = func(ev Event) { stages = append(stages, ev.Stage) }
+
+	run(t, e, Options{Command: "mytool", AutoInstall: true}, distros("a"))
+	want := []Stage{StagePreparing, StageRunning, StageRunning, StageDone}
+	if !slices.Equal(stages, want) {
+		t.Errorf("stages = %v, want %v: mounting builds nothing", stages, want)
+	}
+}
+
+func TestHostToolHashInCacheKey(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = backend.Result{Stdout: "ok\n"}
+	store, err := cache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ht := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+	e.Cache = store
+	opts := Options{Command: "mytool", AutoInstall: true}
+
+	run(t, e, opts, distros("a"))
+	rep := run(t, e, opts, distros("a"))
+	if o := rep.Outcomes[0]; !o.Cached || o.Status != Pass || c.runCount() != 2 {
+		t.Fatalf("same tool: cached %v status %s runs %d; want a cached PASS after 2 runs", o.Cached, o.Status, c.runCount())
+	}
+
+	ht.mu.Lock()
+	ht.hashes["mytool"] = "h2"
+	ht.mu.Unlock()
+	rep = run(t, e, opts, distros("a"))
+	if o := rep.Outcomes[0]; o.Cached || c.runCount() != 3 {
+		t.Errorf("edited tool: cached %v runs %d; want a fresh run", o.Cached, c.runCount())
+	}
+	if got := c.lastRun().Mounts; len(got) != 1 || got[0].Hash != "h2" {
+		t.Errorf("last run mounts = %+v, want the new hash", got)
+	}
+}
+
+func TestCacheKeyIncludesMountTarget(t *testing.T) {
+	env := backend.Environment{ImageID: "sha256:a"}
+	opts := Options{Command: "x"}
+	a, b := env, env
+	a.Mounts = []backend.Mount{{Source: "/h/x", Target: "/usr/local/bin/x", Hash: "1"}}
+	b.Mounts = []backend.Mount{{Source: "/h/x", Target: "/usr/local/bin/y", Hash: "1"}}
+	keys := map[string]bool{cacheKey(opts, env): true, cacheKey(opts, a): true, cacheKey(opts, b): true}
+	if len(keys) != 3 {
+		t.Errorf("mount targets must be part of the cache key")
 	}
 }
