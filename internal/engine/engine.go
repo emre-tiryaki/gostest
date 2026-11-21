@@ -65,7 +65,16 @@ type Options struct {
 	// distribution but not on the host, and runs the command again, for
 	// at most MaxInstallRounds rounds.
 	AutoInstall bool
+	// Dependencies are commands the command is known to need, e.g. found
+	// by scanning it (see deps.Scan). With AutoInstall, those a
+	// distribution lacks are mounted or installed before the first run,
+	// so one round finds them all.
+	Dependencies []string
 }
+
+// probeMarker starts the script that finds which Dependencies a
+// distribution lacks.
+const probeMarker = "# gostest: dependency probe\n"
 
 // MaxInstallRounds bounds how often missing commands are installed for one
 // distribution: a command found in one round may need others that only
