@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -175,6 +176,7 @@ type flags struct {
 	noAutoInst   bool
 	cleanup      bool
 	clearCache   bool
+	saveDeps     bool
 	format       string
 	color        string
 	context      int
@@ -221,6 +223,7 @@ func (a *App) parseFlags(args []string) (*flags, []string, error) {
 	fs.BoolVar(&f.noAutoInst, "no-auto-install", false, "")
 	fs.BoolVar(&f.cleanup, "cleanup", false, "")
 	fs.BoolVar(&f.clearCache, "clear-cache", false, "")
+	fs.BoolVar(&f.saveDeps, "save-deps", false, "")
 	fs.StringVar(&f.format, "format", "text", "")
 	fs.StringVar(&f.color, "color", "auto", "")
 	fs.IntVar(&f.context, "context", report.DefaultContext, "")
@@ -290,6 +293,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	workdir, err := a.workdir(f.workdir)
 	if err != nil {
 		return a.usageError(err)
+	}
+	if f.saveDeps {
+		return a.saveDeps(f.configPath, strings.Join(rest, " "), workdir)
 	}
 	cfg, err := a.loadConfig(f.configPath, workdir)
 	if err != nil {
@@ -468,25 +474,87 @@ func (a *App) options(f *flags, cfg config.Config, reg *distro.Registry, command
 	}
 	opts.Packages = cfgPkgs.Merge(flagPkgs)
 	if opts.AutoInstall {
-		opts.Dependencies = a.hostDependencies(command, workdir)
+		opts.Dependencies = a.hostDependencies(cfg.Dependencies, command, workdir)
 	}
 	return opts, distros, nil
 }
 
-// hostDependencies returns the commands found by scanning command that
-// the host has: one the host lacks fails the reference too, so installing
-// it in the distributions would only hide that.
-func (a *App) hostDependencies(command, workdir string) []string {
-	if a.Deps == nil {
-		return nil
+// hostDependencies returns the configured dependencies and those found by
+// scanning command, keeping the ones the host has: a command the host
+// lacks fails the reference too, so installing it in the distributions
+// would only hide that.
+func (a *App) hostDependencies(configured []string, command, workdir string) []string {
+	all := slices.Clone(configured)
+	if a.Deps != nil {
+		all = append(all, a.Deps(command, workdir)...)
 	}
 	var out []string
-	for _, c := range a.Deps(command, workdir) {
+	for _, c := range all {
+		if slices.Contains(out, c) {
+			continue
+		}
 		if _, err := a.LookPath(c); err == nil {
 			out = append(out, c)
 		}
 	}
 	return out
+}
+
+func dependencies(n int) string {
+	if n == 1 {
+		return "1 dependency"
+	}
+	return fmt.Sprintf("%d dependencies", n)
+}
+
+// saveDeps implements --save-deps: it adds the commands command needs to
+// the configuration file (configPath, the nearest one, or a new one in
+// workdir) without running anything.
+func (a *App) saveDeps(configPath, command, workdir string) int {
+	path := configPath
+	if path == "" {
+		found, ok := config.Find(workdir)
+		if !ok {
+			found = filepath.Join(workdir, config.FileName)
+		}
+		path = found
+	}
+	if _, err := os.Stat(path); err == nil {
+		if _, err := config.Load(path); err != nil {
+			return a.usageError(err)
+		}
+	}
+
+	var found []string
+	if a.Deps != nil && strings.TrimSpace(command) != "" {
+		found = a.Deps(command, workdir)
+	}
+	added, created, err := config.SaveDependencies(path, found)
+	if err != nil {
+		a.errorf("%v", err)
+		return ExitRuntime
+	}
+
+	switch {
+	case created && len(added) > 0:
+		fmt.Fprintf(a.Stdout, "gostest: created %s with %s: %s\n", path, dependencies(len(added)), strings.Join(added, ", "))
+	case created:
+		fmt.Fprintf(a.Stdout, "gostest: created %s\n", path)
+	case len(added) > 0:
+		fmt.Fprintf(a.Stdout, "gostest: added %s to %s: %s\n", dependencies(len(added)), path, strings.Join(added, ", "))
+	default:
+		fmt.Fprintf(a.Stdout, "gostest: %s is up to date\n", path)
+	}
+	var notOnHost []string
+	for _, c := range found {
+		if _, err := a.LookPath(c); err != nil {
+			notOnHost = append(notOnHost, c)
+		}
+	}
+	if len(notOnHost) > 0 {
+		a.errorf("warning: not found on this machine, so not installed while testing here: %s", strings.Join(notOnHost, ", "))
+	}
+	return ExitOK
 }
 
 func (a *App) containers(ctx context.Context, name string) (Containers, error) {
@@ -677,6 +745,9 @@ Flags:
       --cleanup           remove the images pulled or built for the run
                           when it ends
       --clear-cache       remove cached results
+      --save-deps         do not run: scan the command for the commands it
+                          needs and add them to "dependencies" in the
+                          configuration file, which is created if missing
       --format FORMAT     text or json (default: text)
       --color WHEN        auto, always or never (default: auto)
       --context N         unchanged lines shown around changes (default: 3)

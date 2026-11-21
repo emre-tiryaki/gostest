@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -69,6 +71,149 @@ type Config struct {
 	NoAutoInstall bool `json:"no_auto_install"`
 	// Cleanup removes the images pulled or built for a run when it ends.
 	Cleanup bool `json:"cleanup"`
+	// Dependencies are commands the tested command needs; with automatic
+	// installation, those a distribution lacks are installed before the
+	// first run. --save-deps fills it in by scanning the command.
+	Dependencies []string `json:"dependencies"`
+}
+
+// SaveDependencies adds deps to the "dependencies" list of the
+// configuration file at path, creating the file when it does not exist.
+// The other settings are kept as written, in their order. It returns the
+// commands that were not listed yet and whether the file was created; a
+// file that already lists every command is not rewritten.
+func SaveDependencies(path string, deps []string) (added []string, created bool, err error) {
+	for _, d := range deps {
+		if !distro.ValidCommandName(d) {
+			return nil, false, fmt.Errorf("invalid command name %q", d)
+		}
+	}
+	b, err := os.ReadFile(path)
+	created = errors.Is(err, fs.ErrNotExist)
+	if err != nil && !created {
+		return nil, false, err
+	}
+	empty := len(bytes.TrimSpace(b)) == 0
+
+	mode := fs.FileMode(0o644)
+	var fields []field
+	var list []string
+	if !created {
+		if info, err := os.Stat(path); err == nil {
+			mode = info.Mode().Perm()
+		}
+		if !empty {
+			c, err := parse(b)
+			if err != nil {
+				return nil, false, fmt.Errorf("%s: %w", path, err)
+			}
+			if fields, err = objectFields(b); err != nil {
+				return nil, false, fmt.Errorf("%s: %w", path, err)
+			}
+			list = c.Dependencies
+		}
+	}
+	for _, d := range deps {
+		if !slices.Contains(list, d) {
+			list = append(list, d)
+			added = append(added, d)
+		}
+	}
+	if !created && !empty && len(added) == 0 {
+		return nil, false, nil
+	}
+
+	raw, err := json.Marshal(append([]string{}, list...))
+	if err != nil {
+		return nil, false, err
+	}
+	i := slices.IndexFunc(fields, func(f field) bool { return f.key == "dependencies" })
+	if i >= 0 {
+		fields[i].value = raw
+	} else {
+		fields = append(fields, field{"dependencies", raw})
+	}
+	out, err := render(fields)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := writeFile(path, out, mode); err != nil {
+		return nil, false, err
+	}
+	return added, created, nil
+}
+
+// field is a member of a JSON object, with its value as written.
+type field struct {
+	key   string
+	value json.RawMessage
+}
+
+// objectFields returns the members of the JSON object b in order.
+func objectFields(b []byte) ([]field, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, errors.New("the configuration is not a JSON object")
+	}
+	var fields []field
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, _ := tok.(string)
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
+		}
+		fields = append(fields, field{key, value})
+	}
+	return fields, nil
+}
+
+// render writes fields as an object indented by two spaces.
+func render(fields []field) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteString("{\n")
+	for i, f := range fields {
+		key, err := json.Marshal(f.key)
+		if err != nil {
+			return nil, err
+		}
+		buf.WriteString("  ")
+		buf.Write(key)
+		buf.WriteString(": ")
+		if err := json.Indent(&buf, f.value, "  ", "  "); err != nil {
+			return nil, err
+		}
+		if i < len(fields)-1 {
+			buf.WriteByte(',')
+		}
+		buf.WriteByte('\n')
+	}
+	buf.WriteString("}\n")
+	return buf.Bytes(), nil
+}
+
+// writeFile replaces path atomically with data.
+func writeFile(path string, data []byte, mode fs.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".gostest-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // Load reads and validates the configuration file at path.
@@ -108,6 +253,11 @@ func (c Config) validate() error {
 	case "", "docker", "podman":
 	default:
 		return fmt.Errorf("unknown engine %q: use docker or podman", c.Engine)
+	}
+	for _, d := range c.Dependencies {
+		if !distro.ValidCommandName(d) {
+			return fmt.Errorf("invalid dependency %q: use a command name such as jq", d)
+		}
 	}
 	if _, err := distro.ParsePackages(c.Packages); err != nil {
 		return err

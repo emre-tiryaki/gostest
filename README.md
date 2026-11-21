@@ -151,6 +151,7 @@ PASS   fedora     /bin/sh = bash         exit 0  400ms
 | `--no-auto-install` | Do not mount host tools or install missing commands automatically (see below); test the images as they are. |
 | `--cleanup` | When the run ends, remove the images it pulled or built (see below). |
 | `--clear-cache` | Remove cached results. |
+| `--save-deps` | Do not run anything: scan the command for the commands it needs and add them to `dependencies` in the configuration file, creating it when missing (see below). |
 | `--format FORMAT` | `text` or `json`. |
 | `--color WHEN` | `auto`, `always` or `never`. `NO_COLOR` is honoured. |
 | `--context N` | Unchanged lines shown around each change. Default: `3`. |
@@ -193,7 +194,8 @@ project defaults. Command line flags take precedence.
   "ignore_stderr": false,
   "strict_order": false,
   "no_auto_install": false,
-  "cleanup": false
+  "cleanup": false,
+  "dependencies": ["bash", "jq"]
 }
 ```
 
@@ -248,6 +250,24 @@ has are then looked up in every distribution with one `command -v` probe
 (cached per image), and the missing ones are mounted or installed as above
 in a single round, before the command runs for the first time. Whatever the
 scan misses is still found through the error messages afterwards.
+
+To keep that list in the project, where it can be reviewed and completed by
+hand (for commands the scan cannot see, such as `$TOOL`), use `--save-deps`.
+It runs nothing and needs no container engine:
+
+```text
+$ gostest --save-deps ./install.sh
+gostest: created /home/me/project/.gostest.json with 3 dependencies: bash, curl, tar
+$ gostest --save-deps
+gostest: /home/me/project/.gostest.json is up to date
+```
+
+The commands are added to `"dependencies"` in the `--config` file, the nearest
+`.gostest.json`, or a new one in the working directory; commands already
+listed and the other settings are kept. Without a command it only creates
+the file (`{"dependencies": []}`). Every test run installs the configured
+dependencies first, together with the ones it scans, again keeping only those
+your machine has.
 
 #### Host tools
 
