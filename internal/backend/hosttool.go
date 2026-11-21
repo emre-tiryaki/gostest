@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // HostToolTarget is the directory host tools are mounted into: it is on
@@ -77,4 +79,44 @@ func ClassifyHostTool(path string) (ToolKind, error) {
 		return ToolStaticELF, nil
 	}
 	return ToolUnsupported, nil
+}
+
+// ScriptInterpreter returns the command that runs the script at path, from
+// its shebang line: "bash" for "#!/bin/bash" and "#!/usr/bin/env bash".
+// It is empty when path is not a script.
+func ScriptInterpreter(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	// Linux reads at most 256 bytes of a shebang line.
+	buf := make([]byte, 256)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line, ok := bytes.CutPrefix(buf[:n], []byte("#!"))
+	if !ok {
+		return "", nil
+	}
+	if i := bytes.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	fields := strings.Fields(string(line))
+	if len(fields) == 0 {
+		return "", nil
+	}
+	name := filepath.Base(fields[0])
+	if name != "env" {
+		return name, nil
+	}
+	// env [-i] [-S] [NAME=VALUE]... command [args]
+	for _, f := range fields[1:] {
+		if strings.HasPrefix(f, "-") || strings.Contains(f, "=") {
+			continue
+		}
+		return filepath.Base(f), nil
+	}
+	return "", nil
 }

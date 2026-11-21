@@ -127,15 +127,20 @@ func HostToolResolver(lookPath func(string) (string, error)) func(name string) (
 		if src, err = filepath.Abs(src); err != nil || strings.Contains(src, ":") {
 			return backend.Mount{}, false
 		}
-		if kind, err := backend.ClassifyHostTool(src); err != nil || kind == backend.ToolUnsupported {
+		kind, err := backend.ClassifyHostTool(src)
+		if err != nil || kind == backend.ToolUnsupported {
 			return backend.Mount{}, false
+		}
+		var interpreter string
+		if kind == backend.ToolScript {
+			interpreter, _ = backend.ScriptInterpreter(src)
 		}
 		content, err := os.ReadFile(src)
 		if err != nil {
 			return backend.Mount{}, false
 		}
 		sum := sha256.Sum256(content)
-		return backend.Mount{Source: src, Target: path.Join(backend.HostToolTarget, name), Hash: hex.EncodeToString(sum[:])}, true
+		return backend.Mount{Source: src, Target: path.Join(backend.HostToolTarget, name), Hash: hex.EncodeToString(sum[:]), Interpreter: interpreter}, true
 	}
 }
 
@@ -332,7 +337,11 @@ func (a *App) Run(ctx context.Context, args []string) int {
 
 	var prog *progress
 	if a.StderrTTY && !f.quiet {
-		prog = newProgress(a.Stderr, len(distros))
+		names := make([]string, len(distros))
+		for i, d := range distros {
+			names[i] = d.Name
+		}
+		prog = newProgress(a.Stderr, names)
 		e.Progress = prog.update
 	}
 	rep, err := e.Run(ctx, opts, distros)
@@ -559,38 +568,58 @@ func (a *App) list(reg *distro.Registry) {
 	fmt.Fprintln(a.Stdout, "\nAny distro accepts a tag, e.g. ubuntu:22.04 or alpine:3.18.")
 }
 
-// progress shows a single, continuously rewritten status line on a
-// terminal while distributions are being prepared and run.
+// progress shows one line per distribution plus a counter line at the
+// bottom, redrawn in place on a terminal while distributions are prepared
+// and run.
 type progress struct {
 	w      io.Writer
-	total  int
+	names  []string
 	done   int
-	stages map[string]engine.Stage
+	stages map[string]string
+	drawn  int
 }
 
-func newProgress(w io.Writer, total int) *progress {
-	return &progress{w: w, total: total, stages: map[string]engine.Stage{}}
+func newProgress(w io.Writer, names []string) *progress {
+	p := &progress{w: w, names: names, stages: map[string]string{}}
+	for _, n := range names {
+		p.stages[n] = "waiting"
+	}
+	return p
 }
 
 func (p *progress) update(ev engine.Event) {
 	if ev.Stage == engine.StageDone {
 		p.done++
-		delete(p.stages, ev.Distro)
+		p.stages[ev.Distro] = "done " + string(ev.Status)
 	} else {
-		p.stages[ev.Distro] = ev.Stage
+		p.stages[ev.Distro] = string(ev.Stage)
 	}
-	var active []string
-	for name, stage := range p.stages {
-		active = append(active, name+" ("+string(stage)+")")
+	p.draw()
+}
+
+// draw rewrites the block. The cursor rests at the end of its last line.
+func (p *progress) draw() {
+	var b strings.Builder
+	if p.drawn > 1 {
+		fmt.Fprintf(&b, "\x1b[%dA", p.drawn-1)
 	}
-	sort.Strings(active)
-	fmt.Fprintf(p.w, "\r\x1b[K[%d/%d] %s", p.done, p.total, strings.Join(active, ", "))
+	b.WriteString("\r")
+	for _, n := range p.names {
+		fmt.Fprintf(&b, "\x1b[K  %-16s %s\n", n, p.stages[n])
+	}
+	fmt.Fprintf(&b, "\x1b[K[%d/%d]", p.done, len(p.names))
+	p.drawn = len(p.names) + 1
+	fmt.Fprint(p.w, b.String())
 }
 
 func (p *progress) finish() {
-	if p != nil {
-		fmt.Fprint(p.w, "\r\x1b[K")
+	if p == nil || p.drawn == 0 {
+		return
 	}
+	if p.drawn > 1 {
+		fmt.Fprintf(p.w, "\x1b[%dA", p.drawn-1)
+	}
+	fmt.Fprint(p.w, "\r\x1b[J")
 }
 
 const usage = `Usage: gostest [flags] [--] command [args...]

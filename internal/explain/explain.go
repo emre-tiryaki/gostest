@@ -60,6 +60,9 @@ type Context struct {
 	// NotProvided lists commands that were installed automatically
 	// without success because no package provides them.
 	NotProvided []string
+	// MountedInterpreters maps host tools mounted into the target to the
+	// interpreter of their shebang line.
+	MountedInterpreters map[string]string
 }
 
 // MaxCauses bounds the number of causes derived from stderr.
@@ -278,6 +281,13 @@ func MissingCommands(ref, got backend.Result) []string {
 func notFound(name string, c Context) Reason {
 	if hint, ok := bashisms[name]; ok {
 		return Reason{KindBashism, fmt.Sprintf("`%s` is not available%s: it is a bash/ksh feature, %s", name, shellDesc(c), hint)}
+	}
+	if interp, ok := c.MountedInterpreters[name]; ok {
+		d := c.Distro
+		if d == "" {
+			d = "<distro>"
+		}
+		return Reason{KindMissingInterpreter, fmt.Sprintf("`%s` is mounted from the host, but its interpreter `%s` is not installed here; add its package with --pkg %s=<package>", name, interp, d)}
 	}
 	if strings.Contains(name, "/") {
 		return Reason{KindMissingInterpreter, fmt.Sprintf("`%s` could not be executed: the file or the interpreter in its shebang line does not exist here", name)}

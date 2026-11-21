@@ -483,3 +483,16 @@ func TestMissingCommandWithoutPackage(t *testing.T) {
 		t.Errorf("jq was not tried, reason %q should not say no package was found", r.Message)
 	}
 }
+
+func TestMountedScriptWithMissingInterpreter(t *testing.T) {
+	ref := backend.Result{Stdout: "ok\n"}
+	got := backend.Result{Stderr: "/bin/sh: mytool: not found\n", ExitCode: 127}
+	c := Context{Distro: "alpine", Shell: "busybox ash", MountedInterpreters: map[string]string{"mytool": "bash"}}
+	reasons := Explain(ref, got, compare.Compare(ref, got, compare.Options{}), c)
+	mustFind(t, reasons, KindMissingInterpreter, "`mytool`", "`bash`", "--pkg alpine=")
+	for _, r := range reasons {
+		if r.Kind == KindMissingCommand {
+			t.Errorf("unexpected missing-command reason %q", r.Message)
+		}
+	}
+}
