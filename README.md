@@ -148,7 +148,7 @@ PASS   fedora     /bin/sh = bash         exit 0  400ms
 | `--workdir DIR` | Working directory mounted into the containers. Default: current directory. |
 | `--config FILE` | Configuration file. Default: nearest `.gostest.json`. |
 | `--no-cache` | Ignore cached results and rebuild images. |
-| `--no-auto-install` | Do not install missing commands automatically (see below); test the images as they are. |
+| `--no-auto-install` | Do not mount host tools or install missing commands automatically (see below); test the images as they are. |
 | `--cleanup` | When the run ends, remove the images it pulled or built (see below). |
 | `--clear-cache` | Remove cached results. |
 | `--format FORMAT` | `text` or `json`. |
@@ -222,8 +222,43 @@ to install a package whose name differs from the command.
 
 Shell keywords such as `[[`, paths and commands that are missing on the host
 as well are never installed. The derived images are cached like the ones of
-`--pkg`. To test the images exactly as they are, pass `--no-auto-install` or
-set `"no_auto_install": true`.
+`--pkg`.
+
+#### Host tools
+
+Before installing anything, gostest checks whether the missing command is a
+tool on your machine that can run anywhere: a script (a text file starting
+with `#!`) or a statically linked binary. If so, that file (with symlinks
+followed) is mounted read-only at `/usr/local/bin/<command>` and the command
+runs again. Every distribution then runs **your** version of the tool, and
+only the environment around it (shell, core tools, versions) differs:
+
+```text
+$ gostest 'ani-cli -V'
+FAIL   alpine     /bin/sh = busybox ash  exit 1  374ms
+       note: mounted from the host because they were missing here: `ani-cli`
+       ...
+         + Program curl not found
+```
+
+Host tools are tried first because a packaged version would make the
+comparison with your machine meaningless. If the script's interpreter is
+missing (`#!/bin/bash` on Alpine), it is installed in the next round as
+described above. Dynamically linked binaries are never mounted: they are
+built against your machine's libc and libraries, so they would fail on musl
+(Alpine) and give misleading results elsewhere; they go through the package
+manager instead. Editing a mounted file invalidates the cached results that
+used it.
+
+Limits: only the file itself is mounted, so a script that sources files next
+to it, or loads them from a `lib/` directory, fails in the containers. The
+dependencies the tool checks for itself (such as `Program curl not found`)
+are not installed automatically; add them with `--pkg`. A host path
+containing `:` cannot be mounted. Scripts your distribution ships as part of
+a package (e.g. `zgrep`) are also mounted when a target lacks them.
+
+To test the images exactly as they are, pass `--no-auto-install` or set
+`"no_auto_install": true`; this disables mounting host tools as well.
 
 ### Cleaning up
 
@@ -304,6 +339,7 @@ The project is at an early stage.
 - [x] Per-distro dependency installation and image cache
 - [x] Result cache and `--no-cache`
 - [x] Automatic installation of missing commands and `--no-auto-install`
+- [x] Mounting missing host tools (scripts, static binaries) into the containers
 - [x] `--cleanup` to remove the images of a run
 - [x] Concurrency limit and timeout configuration
 - [x] Detailed reporting that shows the cause of a difference
