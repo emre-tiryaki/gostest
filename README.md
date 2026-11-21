@@ -243,8 +243,8 @@ FAIL   alpine     /bin/sh = busybox ash  exit 1  374ms
 
 Host tools are tried first because a packaged version would make the
 comparison with your machine meaningless. If the script's interpreter is
-missing (`#!/bin/bash` on Alpine), it is installed in the next round as
-described above. Dynamically linked binaries are never mounted: they are
+missing (`#!/bin/bash` or `#!/usr/bin/env bash` on Alpine), it is installed
+in the next round as described above. Dynamically linked binaries are never mounted: they are
 built against your machine's libc and libraries, so they would fail on musl
 (Alpine) and give misleading results elsewhere; they go through the package
 manager instead. Editing a mounted file invalidates the cached results that
@@ -326,6 +326,7 @@ Working directories that would shadow system paths (`/`, `/usr/...`,
 ```bash
 make test          # all tests, including Docker integration tests
 make test-short    # unit tests only, no container engine needed
+make e2e           # end-to-end check of host tool mounting with temporary scripts
 make lint          # gofmt + go vet
 ```
 

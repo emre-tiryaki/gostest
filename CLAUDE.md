@@ -13,11 +13,12 @@ make build                 # ./gostest, version from git describe (-X main.versi
 make lint                  # gofmt check + go vet
 make test                  # go test -race ./...  (includes Docker integration tests)
 make test-short            # -short: skips integration tests, no container engine needed
+make e2e                   # scripts/e2e-host-tools.sh: real binary, temporary host scripts
 go test -run TestParseList ./internal/distro          # single test
 go test -run Integration -v ./internal/backend        # real-Docker tests only
 ```
 
-Integration tests live in `internal/backend/docker_integration_test.go`; they skip under `-short` or when `docker version` fails, and pull `alpine` and `debian` images on first run.
+Integration tests live in `internal/backend/docker_integration_test.go` and, end to end through the real `cli.App`, in `internal/cli/hosttool_integration_test.go`; they skip under `-short` or when Docker is unreachable, and pull `alpine` and `debian` images on first run. `make e2e` runs `scripts/e2e-host-tools.sh`, which builds the binary and checks host tool mounting with temporary scripts on `PATH` (`DISTROS=`, `GOSTEST=`, `KEEP=1` to tune it).
 
 ## Architecture
 
