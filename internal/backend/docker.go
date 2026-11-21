@@ -255,15 +255,33 @@ func (d *Docker) Prepare(ctx context.Context, dist distro.Distro, pkgs []string,
 	return env, nil
 }
 
+// Labels of the images Provide builds: the ID of the environment image
+// they were provided for, and the sorted, space separated commands they
+// tried to install on it.
+const (
+	LabelBase     = "io.gostest.base"
+	LabelCommands = "io.gostest.commands"
+)
+
 // Provide builds, on top of env, an image in which the distribution's
 // package manager tried to install a package providing each of cmds, and
 // returns the environment of that image. Its Provided field adds the
 // commands of cmds that are available there; a command no package
 // provides is left out rather than reported as an error. Like the images
-// of Prepare, the image is reused until env or cmds change; rebuild forces
-// a fresh build.
+// of Prepare, the image is reused until env or the set of cmds changes,
+// whatever their order. When it does not exist yet, it is built on the
+// earlier image of env whose commands are the largest subset of cmds, so
+// that only the new commands are installed. rebuild forces a fresh build
+// of every command on env.
 func (d *Docker) Provide(ctx context.Context, env Environment, cmds []string, rebuild bool) (Environment, error) {
-	script, err := distro.ProvideScript(env.Distro.PackageManager, cmds)
+	var asked []string
+	for _, c := range cmds {
+		if !slices.Contains(asked, c) {
+			asked = append(asked, c)
+		}
+	}
+	set := slices.Sorted(slices.Values(asked))
+	script, err := distro.ProvideScript(env.Distro.PackageManager, set)
 	if err != nil {
 		return Environment{}, fmt.Errorf("%s: %w", env.Distro.Name, err)
 	}
@@ -271,11 +289,29 @@ func (d *Docker) Provide(ctx context.Context, env Environment, cmds []string, re
 		return env, nil
 	}
 	tag := derivedTag(env.Distro, env.ImageID, script)
-	id, err := d.derive(ctx, env.Distro, env.Image, tag, script, cmds, rebuild)
+	d.own(tag)
+	id, ok, err := d.imageID(ctx, tag)
 	if err != nil {
 		return Environment{}, err
 	}
-	found, err := d.available(ctx, tag, cmds)
+	if !ok || rebuild {
+		from, todo := env.Image, script
+		if !rebuild {
+			if base, have := d.closestProvided(ctx, env.ImageID, set); base != "" {
+				d.own(base)
+				missing := slices.DeleteFunc(slices.Clone(set), func(c string) bool { return slices.Contains(have, c) })
+				if todo, err = distro.ProvideScript(env.Distro.PackageManager, missing); err != nil {
+					return Environment{}, fmt.Errorf("%s: %w", env.Distro.Name, err)
+				}
+				from = base
+			}
+		}
+		labels := []string{LabelBase + "=" + env.ImageID, LabelCommands + `="` + strings.Join(set, " ") + `"`}
+		if id, err = d.buildImage(ctx, env.Distro, from, tag, todo, asked, labels, rebuild); err != nil {
+			return Environment{}, err
+		}
+	}
+	found, err := d.available(ctx, tag, asked)
 	if err != nil {
 		return Environment{}, fmt.Errorf("%s: checking installed commands: %w", env.Distro.Name, err)
 	}
@@ -287,7 +323,39 @@ func (d *Docker) Provide(ctx context.Context, env Environment, cmds []string, re
 	return out, nil
 }
 
-// available returns the commands of cmds that image can run.
+// closestProvided returns, among the images Provide built for the image
+// baseID, the one whose commands are the largest strict subset of set
+// (sorted), with those commands; it returns "" when there is none. Errors
+// only mean that nothing is reused.
+func (d *Docker) closestProvided(ctx context.Context, baseID string, set []string) (string, []string) {
+	stdout, _, code, err := d.Exec.Exec(ctx, nil, d.Binary, "images", "--filter", "label="+LabelBase+"="+baseID, "--format", "{{.Repository}}:{{.Tag}}")
+	if err != nil || code != 0 {
+		return "", nil
+	}
+	var best string
+	var bestCmds []string
+	for ref := range strings.SplitSeq(string(stdout), "\n") {
+		ref = strings.TrimSpace(ref)
+		if !strings.HasPrefix(ref, "gostest/") || strings.Contains(ref, "<none>") {
+			continue
+		}
+		out, _, code, err := d.Exec.Exec(ctx, nil, d.Binary, "image", "inspect", "--format", `{{index .Config.Labels "`+LabelCommands+`"}}`, ref)
+		if err != nil || code != 0 {
+			continue
+		}
+		have := strings.Fields(string(out))
+		if len(have) == 0 || len(have) >= len(set) || len(have) <= len(bestCmds) {
+			continue
+		}
+		if !slices.ContainsFunc(have, func(c string) bool { return !slices.Contains(set, c) }) {
+			best, bestCmds = ref, have
+		}
+	}
+	return best, bestCmds
+}
+
+// available returns the commands of cmds that image can run, in the
+// order of cmds.
 func (d *Docker) available(ctx context.Context, image string, cmds []string) ([]string, error) {
 	quoted := make([]string, len(cmds))
 	for i, c := range cmds {
@@ -301,10 +369,14 @@ func (d *Docker) available(ctx context.Context, image string, cmds []string) ([]
 	if res.TimedOut || res.ExitCode != 0 {
 		return nil, fmt.Errorf("exit code %d: %s", res.ExitCode, tail(res.Stderr, 5))
 	}
-	var found []string
+	var lines []string
 	for l := range strings.SplitSeq(res.Stdout, "\n") {
-		if l = strings.TrimSpace(l); slices.Contains(cmds, l) && !slices.Contains(found, l) {
-			found = append(found, l)
+		lines = append(lines, strings.TrimSpace(l))
+	}
+	var found []string
+	for _, c := range cmds {
+		if slices.Contains(lines, c) && !slices.Contains(found, c) {
+			found = append(found, c)
 		}
 	}
 	return found, nil
@@ -321,10 +393,16 @@ func (d *Docker) derive(ctx context.Context, dist distro.Distro, from, tag, scri
 	if ok && !rebuild {
 		return id, nil
 	}
-	if err := d.build(ctx, dist, from, tag, script, what, rebuild); err != nil {
+	return d.buildImage(ctx, dist, from, tag, script, what, nil, rebuild)
+}
+
+// buildImage builds tag with build and returns its ID.
+func (d *Docker) buildImage(ctx context.Context, dist distro.Distro, from, tag, script string, what, labels []string, noCache bool) (string, error) {
+	if err := d.build(ctx, dist, from, tag, script, what, labels, noCache); err != nil {
 		return "", err
 	}
-	if id, ok, err = d.imageID(ctx, tag); err != nil {
+	id, ok, err := d.imageID(ctx, tag)
+	if err != nil {
 		return "", err
 	} else if !ok {
 		return "", fmt.Errorf("%s: built image %s not found", dist.Name, tag)
@@ -374,8 +452,8 @@ func (d *Docker) ensureImage(ctx context.Context, ref string) (string, error) {
 }
 
 // build builds tag from the image from by running script, which installs
-// what (packages or commands, for messages).
-func (d *Docker) build(ctx context.Context, dist distro.Distro, from, tag, script string, what []string, noCache bool) error {
+// what (packages or commands, for messages), and sets labels (key=value).
+func (d *Docker) build(ctx context.Context, dist distro.Distro, from, tag, script string, what, labels []string, noCache bool) error {
 	dir, err := os.MkdirTemp("", "gostest-build-")
 	if err != nil {
 		return err
@@ -383,8 +461,11 @@ func (d *Docker) build(ctx context.Context, dist distro.Distro, from, tag, scrip
 	defer os.RemoveAll(dir)
 
 	dockerfile := "FROM " + from + "\n" +
-		"LABEL io.gostest.distro=" + dist.Name + "\n" +
-		"RUN " + script + "\n"
+		"LABEL io.gostest.distro=" + dist.Name + "\n"
+	for _, l := range labels {
+		dockerfile += "LABEL " + l + "\n"
+	}
+	dockerfile += "RUN " + script + "\n"
 	args := []string{"build", "-t", tag, "-f", "-"}
 	if noCache {
 		args = append(args, "--no-cache")
