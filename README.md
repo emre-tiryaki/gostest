@@ -155,7 +155,7 @@ PASS   fedora     /bin/sh = bash         exit 0  400ms
 | `--color WHEN` | `auto`, `always` or `never`. `NO_COLOR` is honoured. |
 | `--context N` | Unchanged lines shown around each change. Default: `3`. |
 | `-v, --verbose` | Show the full output of every run. |
-| `-q, --quiet` | Do not show progress. |
+| `-q, --quiet` | Do not show progress (on a terminal it is one line per distro with a `[done/total]` counter at the bottom). |
 | `--list` | List the known distributions. |
 
 Exit codes: `0` everything matches, `1` at least one distribution differs or

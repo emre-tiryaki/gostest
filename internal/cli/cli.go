@@ -590,7 +590,7 @@ func newProgress(w io.Writer, names []string) *progress {
 func (p *progress) update(ev engine.Event) {
 	if ev.Stage == engine.StageDone {
 		p.done++
-		p.stages[ev.Distro] = "done"
+		p.stages[ev.Distro] = "done " + string(ev.Status)
 	} else {
 		p.stages[ev.Distro] = string(ev.Stage)
 	}
