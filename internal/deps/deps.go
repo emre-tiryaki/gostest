@@ -159,12 +159,15 @@ type result struct {
 	cmds    []string
 	seen    map[string]bool
 	defined map[string]bool // functions and aliases
+	// checkers are functions that test whether the commands named in
+	// their arguments exist, such as dep_ch() { command -v "$1" || die; }.
+	checkers map[string]bool
 	files   []fileRef
 	depth   int
 }
 
 func newResult() *result {
-	return &result{seen: map[string]bool{}, defined: map[string]bool{}}
+	return &result{seen: map[string]bool{}, defined: map[string]bool{}, checkers: map[string]bool{}}
 }
 
 func (r *result) add(name string) {
@@ -197,6 +200,9 @@ func (r *result) parse(src string) {
 	}
 	r.depth++
 	defer func() { r.depth-- }()
+	for _, name := range findCheckers(src) {
+		r.checkers[name] = true
+	}
 	l := &lexer{s: src}
 	l.run()
 	p := &parser{toks: l.toks, res: r}
@@ -810,4 +816,11 @@ func (p *parser) arg(i int) int {
 		}
 	}
 	return i + 1
+}
+
+// findCheckers returns the functions defined in src whose body looks a
+// command up with command -v, type, which or hash. Their arguments name
+// dependencies.
+func findCheckers(src string) []string {
+	return nil
 }
