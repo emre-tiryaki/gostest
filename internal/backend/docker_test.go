@@ -856,3 +856,12 @@ func TestProvideAvailabilityCheckFailure(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
+
+func TestDerivedTagIsValidImageReference(t *testing.T) {
+	dist := distro.Distro{Name: "ubuntu:Jammy", Image: "ubuntu:Jammy", PackageManager: distro.APT}
+	tag := derivedTag(dist, "sha256:abc", "apt-get install -y curl")
+	repo, _, _ := strings.Cut(tag, ":")
+	if repo != strings.ToLower(repo) {
+		t.Errorf("derivedTag(%q) = %q: repository names must be lowercase", dist.Name, tag)
+	}
+}

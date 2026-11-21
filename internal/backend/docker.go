@@ -278,7 +278,8 @@ func (d *Docker) derive(ctx context.Context, dist distro.Distro, from, tag, scri
 
 func derivedTag(dist distro.Distro, baseID, script string) string {
 	sum := sha256.Sum256([]byte(baseID + "\n" + script))
-	return "gostest/" + strings.ReplaceAll(dist.Name, ":", "-") + ":" + hex.EncodeToString(sum[:])[:12]
+	// Repository names must be lowercase, but image tags such as "Jammy" are not.
+	return "gostest/" + strings.ToLower(strings.ReplaceAll(dist.Name, ":", "-")) + ":" + hex.EncodeToString(sum[:])[:12]
 }
 
 // imageID returns the ID of a local image and whether it exists.
