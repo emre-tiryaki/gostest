@@ -22,6 +22,7 @@ import (
 	"github.com/emre-tiryaki/gostest/internal/cache"
 	"github.com/emre-tiryaki/gostest/internal/compare"
 	"github.com/emre-tiryaki/gostest/internal/config"
+	"github.com/emre-tiryaki/gostest/internal/deps"
 	"github.com/emre-tiryaki/gostest/internal/distro"
 	"github.com/emre-tiryaki/gostest/internal/engine"
 	"github.com/emre-tiryaki/gostest/internal/report"
@@ -81,6 +82,10 @@ type App struct {
 	// mounted into its containers, see HostToolResolver; nil disables
 	// mounting.
 	HostTool func(name string) (backend.Mount, bool)
+	// Deps finds the commands a command run in dir needs, see deps.Scan;
+	// those found on the host are installed before the first run when
+	// auto-install is on. Nil disables scanning.
+	Deps func(command, dir string) []string
 
 	// MaxFingerprintFiles overrides DefaultMaxFingerprintFiles when > 0.
 	MaxFingerprintFiles int
@@ -104,6 +109,7 @@ func New(version string) *App {
 		Getenv:   os.Getenv,
 		CacheDir: cache.DefaultDir,
 		HostTool: HostToolResolver(exec.LookPath),
+		Deps:     deps.Scan,
 		Version:  version,
 	}
 }
@@ -461,7 +467,26 @@ func (a *App) options(f *flags, cfg config.Config, reg *distro.Registry, command
 		return engine.Options{}, nil, err
 	}
 	opts.Packages = cfgPkgs.Merge(flagPkgs)
+	if opts.AutoInstall {
+		opts.Dependencies = a.hostDependencies(command, workdir)
+	}
 	return opts, distros, nil
+}
+
+// hostDependencies returns the commands found by scanning command that
+// the host has: one the host lacks fails the reference too, so installing
+// it in the distributions would only hide that.
+func (a *App) hostDependencies(command, workdir string) []string {
+	if a.Deps == nil {
+		return nil
+	}
+	var out []string
+	for _, c := range a.Deps(command, workdir) {
+		if _, err := a.LookPath(c); err == nil {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (a *App) containers(ctx context.Context, name string) (Containers, error) {

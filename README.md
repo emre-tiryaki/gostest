@@ -224,6 +224,31 @@ Shell keywords such as `[[`, paths and commands that are missing on the host
 as well are never installed. The derived images are cached like the ones of
 `--pkg`.
 
+#### Dependencies found before running
+
+Waiting for "not found" errors has blind spots: a script stops at its first
+missing command, branches that did not run report nothing, and checks such
+as `command -v jq || echo "no jq"` print no error at all. So before the first
+run gostest also reads the command without running it and collects the
+commands it would run:
+
+- command words after `;`, `|`, `&&`, `||`, `then`, `do` …, including those
+  in `$(...)`, backticks, `<(...)`, heredocs and `sh -c '...'`;
+- the commands run by `env`, `sudo`, `nice`, `timeout`, `xargs`,
+  `find -exec` and similar wrappers;
+- the arguments of `command -v`, `type`, `hash` and `which`;
+- for scripts run by path (`./install.sh`), given to a shell
+  (`bash build.sh`) or sourced (`. ./lib.sh`): the interpreter in their
+  shebang line and, recursively, the commands in them. Relative paths are
+  resolved against the working directory, as the shell does.
+
+Builtins, functions and aliases the scripts define, and names only known at
+run time (`$CC`, `"$(which cc)"`), are left out. The commands your machine
+has are then looked up in every distribution with one `command -v` probe
+(cached per image), and the missing ones are mounted or installed as above
+in a single round, before the command runs for the first time. Whatever the
+scan misses is still found through the error messages afterwards.
+
 #### Host tools
 
 Before installing anything, gostest checks whether the missing command is a
