@@ -241,6 +241,21 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 	}
 	o.Env = env
 
+	var st installState
+	if opts.AutoInstall && len(opts.Dependencies) > 0 {
+		// Known dependencies first, so the rounds below only have to
+		// find what the scan missed.
+		missing := e.missingDependencies(ctx, opts, o.Env)
+		if ctx.Err() != nil {
+			return o
+		}
+		if len(missing) > 0 {
+			if _, cancelled := e.install(ctx, opts, &o, missing, &st); cancelled {
+				return o
+			}
+		}
+	}
+
 	if err := e.execute(ctx, opts, spec, &o); err != nil {
 		if ctx.Err() != nil {
 			return o
@@ -257,9 +272,7 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		return o
 	}
 
-	var tried, mounted, failed []string
-	var installErr error
-	for round := 0; opts.AutoInstall && round < MaxInstallRounds && installErr == nil; round++ {
+	for round := 0; opts.AutoInstall && round < MaxInstallRounds && st.err == nil; round++ {
 		var missing []string
 		for _, c := range explain.MissingCommands(ref.result, o.Result) {
 			if interp, ok := mountedInterpreter(o.Env.Mounts, c); ok {
@@ -268,50 +281,21 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 				// not found.
 				c = interp
 			}
-			if !slices.Contains(tried, c) && !slices.Contains(missing, c) {
+			if !slices.Contains(st.tried, c) && !slices.Contains(missing, c) {
 				missing = append(missing, c)
 			}
 		}
 		if len(missing) == 0 {
 			break
 		}
-		tried = append(tried, missing...)
-
-		// Host tools first: the user tests their own version of a tool,
-		// which a packaged one would replace.
-		next := o.Env
-		next.Mounts = slices.Clone(o.Env.Mounts)
-		var toProvide []string
-		for _, c := range missing {
-			if e.HostTool != nil {
-				if m, ok := e.HostTool(c); ok {
-					next.Mounts = append(next.Mounts, m)
-					mounted = append(mounted, c)
-					continue
-				}
-			}
-			toProvide = append(toProvide, c)
+		changed, cancelled := e.install(ctx, opts, &o, missing, &st)
+		if cancelled {
+			return o
 		}
-		progress := len(next.Mounts) > len(o.Env.Mounts)
-
-		if len(toProvide) > 0 {
-			e.emit(Event{Distro: d.Name, Stage: StageInstalling})
-			provided, err := e.Containers.Provide(ctx, next, toProvide, opts.NoCache)
-			switch {
-			case err != nil && ctx.Err() != nil:
-				return o
-			case err != nil:
-				// Still run again when something was mounted.
-				failed, installErr = toProvide, err
-			case len(provided.Provided) > len(next.Provided):
-				next, progress = provided, true
-			}
-		}
-		if !progress {
+		if !changed {
 			// Nothing new is available: running again would not help.
 			break
 		}
-		o.Env = next
 		if err := e.execute(ctx, opts, spec, &o); err != nil {
 			if ctx.Err() != nil {
 				return o
@@ -335,8 +319,8 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 			ec.MountedInterpreters[path.Base(m.Target)] = m.Interpreter
 		}
 	}
-	for _, c := range tried {
-		if !slices.Contains(o.Env.Provided, c) && !slices.Contains(failed, c) && !slices.Contains(mounted, c) {
+	for _, c := range st.tried {
+		if !slices.Contains(o.Env.Provided, c) && !slices.Contains(st.failed, c) && !slices.Contains(st.mounted, c) {
 			ec.NotProvided = append(ec.NotProvided, c)
 		}
 	}
@@ -346,9 +330,109 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		o.Status = Fail
 		o.Reasons = explain.Explain(ref.result, o.Result, o.Comparison, ec)
 	}
-	o.Notes = append(installNotes(mounted, o.Env.Provided, failed, installErr), explain.Notes(o.Comparison, ec)...)
+	o.Notes = append(installNotes(st.mounted, o.Env.Provided, st.failed, st.err), explain.Notes(o.Comparison, ec)...)
 	e.emit(Event{Distro: d.Name, Stage: StageDone, Status: o.Status})
 	return o
+}
+
+// installState is what the automatic installation did for one
+// distribution.
+type installState struct {
+	// tried are the commands it looked for; mounted those mounted from
+	// the host; failed those whose installation failed with err.
+	tried, mounted, failed []string
+	err                    error
+}
+
+// install makes the missing commands available in o.Env: host tools are
+// mounted (the user tests their own version of a tool, which a packaged
+// one would replace) and packages are installed for the others. It
+// reports whether o.Env changed, and whether ctx ended.
+func (e *Engine) install(ctx context.Context, opts Options, o *Outcome, missing []string, st *installState) (changed, cancelled bool) {
+	st.tried = append(st.tried, missing...)
+	next := o.Env
+	next.Mounts = slices.Clone(o.Env.Mounts)
+	var toProvide []string
+	for _, c := range missing {
+		if e.HostTool != nil {
+			if m, ok := e.HostTool(c); ok {
+				next.Mounts = append(next.Mounts, m)
+				st.mounted = append(st.mounted, c)
+				continue
+			}
+		}
+		toProvide = append(toProvide, c)
+	}
+	changed = len(next.Mounts) > len(o.Env.Mounts)
+
+	if len(toProvide) > 0 {
+		e.emit(Event{Distro: o.Distro.Name, Stage: StageInstalling})
+		provided, err := e.Containers.Provide(ctx, next, toProvide, opts.NoCache)
+		switch {
+		case err != nil && ctx.Err() != nil:
+			return false, true
+		case err != nil:
+			// What was mounted is still used.
+			st.failed, st.err = toProvide, err
+		case len(provided.Provided) > len(next.Provided):
+			next, changed = provided, true
+		}
+	}
+	if changed {
+		o.Env = next
+	}
+	return changed, false
+}
+
+// probeTimeout bounds the dependency probe.
+const probeTimeout = time.Minute
+
+// missingDependencies returns the opts.Dependencies that env lacks, as a
+// probe in env reports them (cached by image). A failing probe reports
+// nothing: the rounds after the first run still find what is missing.
+func (e *Engine) missingDependencies(ctx context.Context, opts Options, env backend.Environment) []string {
+	var cmds []string
+	for _, c := range opts.Dependencies {
+		if distro.ValidCommandName(c) && !slices.Contains(cmds, c) {
+			cmds = append(cmds, c)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	cacheable := e.Cache != nil && env.ImageID != ""
+	key := cache.Key(append([]string{"probe", env.ImageID}, cmds...)...)
+	if cacheable && !opts.NoCache {
+		var cached []string
+		if ok, _ := e.Cache.Get(key, &cached); ok {
+			return cached
+		}
+	}
+	res, err := e.Containers.Run(ctx, backend.Spec{Command: probeCommand(cmds), Image: env.Image, Timeout: probeTimeout})
+	if err != nil || res.ExitCode != 0 || res.TimedOut {
+		return nil
+	}
+	missing := []string{}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if slices.Contains(cmds, line) && !slices.Contains(missing, line) {
+			missing = append(missing, line)
+		}
+	}
+	if cacheable {
+		_ = e.Cache.Put(key, missing)
+	}
+	return missing
+}
+
+// probeCommand prints those of cmds that are not on the PATH, one per
+// line. The names are valid command names, so quoting them is safe.
+func probeCommand(cmds []string) string {
+	quoted := make([]string, len(cmds))
+	for i, c := range cmds {
+		quoted[i] = "'" + c + "'"
+	}
+	return probeMarker + "for c in " + strings.Join(quoted, " ") + `; do command -v "$c" >/dev/null 2>&1 || echo "$c"; done`
 }
 
 // execute sets o.Result to the result of running spec in o.Env, from the
