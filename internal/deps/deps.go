@@ -162,8 +162,8 @@ type result struct {
 	// checkers are functions that test whether the commands named in
 	// their arguments exist, such as dep_ch() { command -v "$1" || die; }.
 	checkers map[string]bool
-	files   []fileRef
-	depth   int
+	files    []fileRef
+	depth    int
 }
 
 func newResult() *result {
@@ -776,6 +776,14 @@ func (p *parser) arg(i int) int {
 	}
 
 	switch {
+	case p.res.checkers[p.cur]:
+		if !opt && !t.dynamic {
+			for _, name := range strings.Split(w, ",") {
+				if !strings.Contains(name, "/") {
+					p.res.add(name)
+				}
+			}
+		}
 	case p.cur == "command -v" || p.cur == "type" || p.cur == "hash" || p.cur == "which":
 		if !opt && !t.dynamic {
 			p.res.add(w)
@@ -822,5 +830,19 @@ func (p *parser) arg(i int) int {
 // command up with command -v, type, which or hash. Their arguments name
 // dependencies.
 func findCheckers(src string) []string {
-	return nil
+	var out []string
+	for _, m := range funcDefRe.FindAllStringSubmatchIndex(src, -1) {
+		body, _ := balanced(src, m[1], '{', '}')
+		if lookupRe.MatchString(body) {
+			out = append(out, src[m[2]:m[3]])
+		}
+	}
+	return out
 }
+
+var (
+	// funcDefRe matches "name() {" and "function name {", up to the brace.
+	funcDefRe = regexp.MustCompile(`(?m)^[ \t]*(?:function[ \t]+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*(?:\([ \t]*\))?[ \t]*\{`)
+	// lookupRe matches a command lookup of a variable: command -v "$1".
+	lookupRe = regexp.MustCompile(`\b(?:command[ \t]+-[vV]|type|which|hash)[ \t]+(?:-[A-Za-z]+[ \t]+)*["']?\$`)
+)
