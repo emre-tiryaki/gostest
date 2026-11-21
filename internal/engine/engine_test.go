@@ -1236,7 +1236,7 @@ func TestHostToolMissingInterpreterIsExplained(t *testing.T) {
 	}
 	found := false
 	for _, r := range o.Reasons {
-		if strings.Contains(r.Message, "not installed here;") && strings.Contains(r.Message, "`mytool`") {
+		if r.Kind == explain.KindMissingCommand && strings.Contains(r.Message, "`mytool`") {
 			t.Errorf("reason %q: mytool is mounted, its interpreter is missing", r.Message)
 		}
 		if r.Kind == explain.KindMissingInterpreter && strings.Contains(r.Message, "`mytool`") && strings.Contains(r.Message, "`bash`") {

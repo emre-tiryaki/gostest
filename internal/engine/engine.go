@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -252,7 +253,13 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 	for round := 0; opts.AutoInstall && round < MaxInstallRounds && installErr == nil; round++ {
 		var missing []string
 		for _, c := range explain.MissingCommands(ref.result, o.Result) {
-			if !slices.Contains(tried, c) {
+			if interp, ok := mountedInterpreter(o.Env.Mounts, c); ok {
+				// The mounted script is there: busybox ash and dash
+				// report a missing interpreter as the script being
+				// not found.
+				c = interp
+			}
+			if !slices.Contains(tried, c) && !slices.Contains(missing, c) {
 				missing = append(missing, c)
 			}
 		}
@@ -311,6 +318,14 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		RefShell:   e.HostShell,
 		HostLocale: e.HostLocale,
 	}
+	for _, m := range o.Env.Mounts {
+		if m.Interpreter != "" {
+			if ec.MountedInterpreters == nil {
+				ec.MountedInterpreters = map[string]string{}
+			}
+			ec.MountedInterpreters[path.Base(m.Target)] = m.Interpreter
+		}
+	}
 	for _, c := range tried {
 		if !slices.Contains(o.Env.Provided, c) && !slices.Contains(failed, c) && !slices.Contains(mounted, c) {
 			ec.NotProvided = append(ec.NotProvided, c)
@@ -355,6 +370,17 @@ func (e *Engine) execute(ctx context.Context, opts Options, spec backend.Spec, o
 		_ = e.Cache.Put(key, res)
 	}
 	return nil
+}
+
+// mountedInterpreter returns the interpreter of the host script mounted as
+// cmd, if there is one with a usable name.
+func mountedInterpreter(mounts []backend.Mount, cmd string) (string, bool) {
+	for _, m := range mounts {
+		if path.Base(m.Target) == cmd {
+			return m.Interpreter, m.Interpreter != "" && distro.ValidCommandName(m.Interpreter)
+		}
+	}
+	return "", false
 }
 
 // installNotes describes what the automatic installation did.

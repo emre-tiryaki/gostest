@@ -127,15 +127,20 @@ func HostToolResolver(lookPath func(string) (string, error)) func(name string) (
 		if src, err = filepath.Abs(src); err != nil || strings.Contains(src, ":") {
 			return backend.Mount{}, false
 		}
-		if kind, err := backend.ClassifyHostTool(src); err != nil || kind == backend.ToolUnsupported {
+		kind, err := backend.ClassifyHostTool(src)
+		if err != nil || kind == backend.ToolUnsupported {
 			return backend.Mount{}, false
+		}
+		var interpreter string
+		if kind == backend.ToolScript {
+			interpreter, _ = backend.ScriptInterpreter(src)
 		}
 		content, err := os.ReadFile(src)
 		if err != nil {
 			return backend.Mount{}, false
 		}
 		sum := sha256.Sum256(content)
-		return backend.Mount{Source: src, Target: path.Join(backend.HostToolTarget, name), Hash: hex.EncodeToString(sum[:])}, true
+		return backend.Mount{Source: src, Target: path.Join(backend.HostToolTarget, name), Hash: hex.EncodeToString(sum[:]), Interpreter: interpreter}, true
 	}
 }
 
