@@ -21,11 +21,12 @@ type fakeEngine struct {
 	stdins   []string
 	binaries []string
 
-	images   map[string]string // local ref -> image ID
-	remote   map[string]string // pullable ref -> image ID
-	probe    map[string]string // image -> probe stdout
-	buildErr string            // non-empty: builds fail with this stderr
-	rmErr    map[string]string // ref -> stderr of a failing image rm
+	images   map[string]string            // local ref -> image ID
+	labels   map[string]map[string]string // local ref -> labels set by builds
+	remote   map[string]string            // pullable ref -> image ID
+	probe    map[string]string            // image -> probe stdout
+	buildErr string                       // non-empty: builds fail with this stderr
+	rmErr    map[string]string            // ref -> stderr of a failing image rm
 	builds   int
 
 	version func() ([]byte, []byte, int, error)
@@ -35,6 +36,7 @@ type fakeEngine struct {
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{
 		images: map[string]string{},
+		labels: map[string]map[string]string{},
 		remote: map[string]string{},
 		rmErr:  map[string]string{},
 		probe:  map[string]string{},
@@ -75,11 +77,29 @@ func (f *fakeEngine) Exec(ctx context.Context, stdin io.Reader, name string, arg
 		}
 		f.mu.Lock()
 		id, ok := f.images[ref]
+		labels := f.labels[ref]
 		f.mu.Unlock()
 		if !ok {
 			return nil, []byte("Error: No such image: " + ref + "\n"), 1, nil
 		}
+		if format := argAfter(args, "--format"); strings.Contains(format, ".Config.Labels") {
+			key := strings.Split(format, `"`)[1]
+			return []byte(labels[key] + "\n"), nil, 0, nil
+		}
 		return []byte(id + "\n"), nil, 0, nil
+	case "images":
+		// images --filter label=<key>=<value> --format ...
+		key, value, _ := strings.Cut(strings.TrimPrefix(argAfter(args, "--filter"), "label="), "=")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		var out []string
+		for ref, l := range f.labels {
+			if _, ok := f.images[ref]; ok && l[key] == value {
+				out = append(out, ref+"\n")
+			}
+		}
+		slices.Sort(out)
+		return []byte(strings.Join(out, "")), nil, 0, nil
 	case "pull":
 		ref := args[len(args)-1]
 		f.mu.Lock()
@@ -99,6 +119,14 @@ func (f *fakeEngine) Exec(ctx context.Context, stdin io.Reader, name string, arg
 		}
 		tag := args[slices.Index(args, "-t")+1]
 		f.images[tag] = fmt.Sprintf("sha256:built%d", f.builds)
+		labels := map[string]string{}
+		for l := range strings.SplitSeq(in, "\n") {
+			if kv, ok := strings.CutPrefix(l, "LABEL "); ok {
+				k, v, _ := strings.Cut(kv, "=")
+				labels[k] = strings.Trim(v, `"`)
+			}
+		}
+		f.labels[tag] = labels
 		return nil, nil, 0, nil
 	case "rm":
 		return nil, nil, 0, nil
@@ -142,6 +170,19 @@ func (f *fakeEngine) stdinOf(sub string) string {
 		}
 	}
 	return ""
+}
+
+// dockerfiles returns the Dockerfile of every build, in order.
+func (f *fakeEngine) dockerfiles() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for i, c := range f.calls {
+		if c[0] == "build" {
+			out = append(out, f.stdins[i])
+		}
+	}
+	return out
 }
 
 func newTestDocker(f *fakeEngine) *Docker {
@@ -712,7 +753,9 @@ func TestProvideBuildsOnTopOfEnvironment(t *testing.T) {
 	if !strings.HasPrefix(tag, "gostest/alpine:") {
 		t.Errorf("tag = %q, want gostest/alpine:<hash>", tag)
 	}
-	script, _ := distro.ProvideScript(distro.APK, []string{"jq", "curl"})
+	// The script installs the sorted command set, so the order the
+	// commands were found in does not change the image.
+	script, _ := distro.ProvideScript(distro.APK, []string{"curl", "jq"})
 	dockerfile := f.stdinOf("build")
 	if !strings.Contains(dockerfile, "FROM alpine:latest\n") || !strings.Contains(dockerfile, "RUN "+script+"\n") {
 		t.Errorf("Dockerfile = %q", dockerfile)
@@ -836,6 +879,118 @@ func TestProvideTagDependsOnBaseImage(t *testing.T) {
 	}
 	if a.Image == b.Image {
 		t.Errorf("same tag %s for different base images", a.Image)
+	}
+}
+
+func TestProvideTagIgnoresCommandOrder(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = availableRun(f, "jq", "curl")
+	d := newTestDocker(f)
+	a, err := d.Provide(context.Background(), env, []string{"jq", "curl"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := d.Provide(context.Background(), env, []string{"curl", "jq", "curl"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.builds != 1 || a.Image != b.Image {
+		t.Errorf("builds = %d, images %s / %s; want one image for the same commands", f.builds, a.Image, b.Image)
+	}
+	if !slices.Equal(b.Provided, []string{"curl", "jq"}) {
+		t.Errorf("Provided = %v, want each command once, in the order asked", b.Provided)
+	}
+}
+
+func TestProvideAddsOnlyNewCommandsToClosestImage(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = availableRun(f, "jq", "curl", "git", "wget")
+	d := newTestDocker(f)
+	small, err := d.Provide(context.Background(), env, []string{"jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closest, err := d.Provide(context.Background(), env, []string{"jq", "curl"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not a subset of what is asked next: never a starting point.
+	if _, err := d.Provide(context.Background(), env, []string{"jq", "wget"}, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.Provide(context.Background(), env, []string{"git", "curl", "jq"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	builds := f.callsTo("build")
+	if len(builds) != 4 {
+		t.Fatalf("build calls = %v", builds)
+	}
+	dockerfiles := f.dockerfiles()
+	curl, _ := distro.ProvideScript(distro.APK, []string{"curl"})
+	if !strings.Contains(dockerfiles[1], "FROM "+small.Image+"\n") || !strings.Contains(dockerfiles[1], "RUN "+curl+"\n") {
+		t.Errorf("second Dockerfile = %q, want only curl installed on %s", dockerfiles[1], small.Image)
+	}
+	git, _ := distro.ProvideScript(distro.APK, []string{"git"})
+	if !strings.Contains(dockerfiles[3], "FROM "+closest.Image+"\n") || !strings.Contains(dockerfiles[3], "RUN "+git+"\n") {
+		t.Errorf("last Dockerfile = %q, want only git installed on %s", dockerfiles[3], closest.Image)
+	}
+	if l := f.labels[got.Image]; l["io.gostest.base"] != env.ImageID || l["io.gostest.commands"] != "curl git jq" {
+		t.Errorf("labels = %v, want base %s and every command", l, env.ImageID)
+	}
+	if !slices.Equal(got.Provided, []string{"git", "curl", "jq"}) {
+		t.Errorf("Provided = %v", got.Provided)
+	}
+
+	// The image a derived image starts from is cleaned up after it.
+	if err := d.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	removed := f.removed()
+	if i, j := slices.Index(removed, got.Image), slices.Index(removed, closest.Image); i < 0 || j < 0 || i > j {
+		t.Errorf("removed %v, want %s before %s", removed, got.Image, closest.Image)
+	}
+}
+
+func TestProvideReusesOnlyImagesOfSameBase(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = availableRun(f, "jq", "curl")
+	d := newTestDocker(f)
+	if _, err := d.Provide(context.Background(), env, []string{"jq"}, false); err != nil {
+		t.Fatal(err)
+	}
+	other := env
+	other.Image, other.ImageID = "alpine:edge", "sha256:edge"
+	f.images[other.Image] = other.ImageID
+	if _, err := d.Provide(context.Background(), other, []string{"jq", "curl"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if df := f.dockerfiles()[1]; !strings.Contains(df, "FROM alpine:edge\n") {
+		t.Errorf("Dockerfile = %q, want a build on alpine:edge", df)
+	}
+}
+
+func TestProvideRebuildStartsFromEnvironment(t *testing.T) {
+	f := newFakeEngine()
+	env := alpineEnv(f)
+	f.run = availableRun(f, "jq", "curl")
+	d := newTestDocker(f)
+	if _, err := d.Provide(context.Background(), env, []string{"jq"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Provide(context.Background(), env, []string{"jq", "curl"}, true); err != nil {
+		t.Fatal(err)
+	}
+	builds := f.callsTo("build")
+	script, _ := distro.ProvideScript(distro.APK, []string{"curl", "jq"})
+	df := f.dockerfiles()[len(builds)-1]
+	if len(builds) != 2 || !slices.Contains(builds[1], "--no-cache") ||
+		!strings.Contains(df, "FROM alpine:latest\n") || !strings.Contains(df, "RUN "+script+"\n") {
+		t.Errorf("builds = %v, Dockerfile = %q; want a full --no-cache build on the environment", builds, df)
 	}
 }
 
