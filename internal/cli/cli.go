@@ -3,12 +3,15 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -105,10 +108,35 @@ func New(version string) *App {
 	}
 }
 
-// HostToolResolver returns a resolver for App.HostTool that finds commands
-// on the host with lookPath.
+// HostToolResolver returns a resolver for App.HostTool. It finds a command
+// on the host with lookPath, follows symlinks and accepts only files that
+// run the same anywhere (scripts and static binaries, see
+// backend.ClassifyHostTool). They are mounted at
+// backend.HostToolTarget/<name>, and the hash of their contents keeps
+// cached results apart once they change.
 func HostToolResolver(lookPath func(string) (string, error)) func(name string) (backend.Mount, bool) {
-	return func(string) (backend.Mount, bool) { return backend.Mount{}, false }
+	return func(name string) (backend.Mount, bool) {
+		found, err := lookPath(name)
+		if err != nil {
+			return backend.Mount{}, false
+		}
+		src, err := filepath.EvalSymlinks(found)
+		if err != nil {
+			return backend.Mount{}, false
+		}
+		if src, err = filepath.Abs(src); err != nil || strings.Contains(src, ":") {
+			return backend.Mount{}, false
+		}
+		if kind, err := backend.ClassifyHostTool(src); err != nil || kind == backend.ToolUnsupported {
+			return backend.Mount{}, false
+		}
+		content, err := os.ReadFile(src)
+		if err != nil {
+			return backend.Mount{}, false
+		}
+		sum := sha256.Sum256(content)
+		return backend.Mount{Source: src, Target: path.Join(backend.HostToolTarget, name), Hash: hex.EncodeToString(sum[:])}, true
+	}
 }
 
 func isTerminal(f *os.File) bool {
@@ -297,6 +325,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 
 	e := &engine.Engine{Host: a.Host, HostShell: a.HostShell, HostLocale: HostLocale(a.Getenv), Containers: containers}
+	if opts.AutoInstall {
+		e.HostTool = a.HostTool
+	}
 	e.Cache, opts.Fingerprint = a.openCache(workdir)
 
 	var prog *progress
@@ -587,8 +618,8 @@ Flags:
                           containers (default: current directory)
       --config FILE       configuration file (default: nearest .gostest.json)
       --no-cache          ignore cached results and rebuild images
-      --no-auto-install   do not install packages for commands that are
-                          missing in a distribution
+      --no-auto-install   do not mount host tools or install packages for
+                          commands that are missing in a distribution
       --cleanup           remove the images pulled or built for the run
                           when it ends
       --clear-cache       remove cached results

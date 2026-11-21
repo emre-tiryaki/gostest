@@ -247,9 +247,9 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		return o
 	}
 
-	var tried, failed []string
+	var tried, mounted, failed []string
 	var installErr error
-	for round := 0; opts.AutoInstall && round < MaxInstallRounds; round++ {
+	for round := 0; opts.AutoInstall && round < MaxInstallRounds && installErr == nil; round++ {
 		var missing []string
 		for _, c := range explain.MissingCommands(ref.result, o.Result) {
 			if !slices.Contains(tried, c) {
@@ -260,16 +260,38 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 			break
 		}
 		tried = append(tried, missing...)
-		e.emit(Event{Distro: d.Name, Stage: StageInstalling})
-		next, err := e.Containers.Provide(ctx, o.Env, missing, opts.NoCache)
-		if err != nil {
-			if ctx.Err() != nil {
-				return o
+
+		// Host tools first: the user tests their own version of a tool,
+		// which a packaged one would replace.
+		next := o.Env
+		next.Mounts = slices.Clone(o.Env.Mounts)
+		var toProvide []string
+		for _, c := range missing {
+			if e.HostTool != nil {
+				if m, ok := e.HostTool(c); ok {
+					next.Mounts = append(next.Mounts, m)
+					mounted = append(mounted, c)
+					continue
+				}
 			}
-			failed, installErr = missing, err
-			break
+			toProvide = append(toProvide, c)
 		}
-		if len(next.Provided) == len(o.Env.Provided) {
+		progress := len(next.Mounts) > len(o.Env.Mounts)
+
+		if len(toProvide) > 0 {
+			e.emit(Event{Distro: d.Name, Stage: StageInstalling})
+			provided, err := e.Containers.Provide(ctx, next, toProvide, opts.NoCache)
+			switch {
+			case err != nil && ctx.Err() != nil:
+				return o
+			case err != nil:
+				// Still run again when something was mounted.
+				failed, installErr = toProvide, err
+			case len(provided.Provided) > len(next.Provided):
+				next, progress = provided, true
+			}
+		}
+		if !progress {
 			// Nothing new is available: running again would not help.
 			break
 		}
@@ -290,7 +312,7 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		HostLocale: e.HostLocale,
 	}
 	for _, c := range tried {
-		if !slices.Contains(o.Env.Provided, c) && !slices.Contains(failed, c) {
+		if !slices.Contains(o.Env.Provided, c) && !slices.Contains(failed, c) && !slices.Contains(mounted, c) {
 			ec.NotProvided = append(ec.NotProvided, c)
 		}
 	}
@@ -300,7 +322,7 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		o.Status = Fail
 		o.Reasons = explain.Explain(ref.result, o.Result, o.Comparison, ec)
 	}
-	o.Notes = append(installNotes(o.Env.Provided, failed, installErr), explain.Notes(o.Comparison, ec)...)
+	o.Notes = append(installNotes(mounted, o.Env.Provided, failed, installErr), explain.Notes(o.Comparison, ec)...)
 	e.emit(Event{Distro: d.Name, Stage: StageDone, Status: o.Status})
 	return o
 }
@@ -322,6 +344,7 @@ func (e *Engine) execute(ctx context.Context, opts Options, spec backend.Spec, o
 
 	e.emit(Event{Distro: o.Distro.Name, Stage: StageRunning})
 	spec.Image = o.Env.Image
+	spec.Mounts = o.Env.Mounts
 	res, err := e.Containers.Run(ctx, spec)
 	if err != nil {
 		return err
@@ -335,8 +358,11 @@ func (e *Engine) execute(ctx context.Context, opts Options, spec backend.Spec, o
 }
 
 // installNotes describes what the automatic installation did.
-func installNotes(provided, failed []string, err error) []explain.Reason {
+func installNotes(mounted, provided, failed []string, err error) []explain.Reason {
 	var out []explain.Reason
+	if len(mounted) > 0 {
+		out = append(out, explain.Reason{Kind: explain.KindInstalled, Message: "mounted from the host because they were missing here: " + commandList(mounted)})
+	}
 	if len(provided) > 0 {
 		out = append(out, explain.Reason{Kind: explain.KindInstalled, Message: "installed automatically because they were missing here: " + commandList(provided)})
 	}
@@ -361,9 +387,14 @@ func commandList(cmds []string) string {
 }
 
 // cacheKey identifies a container result: the exact image, command,
-// working directory (path and contents) and timeout.
+// working directory (path and contents), timeout and mounted host tools
+// (where and with which contents).
 func cacheKey(opts Options, env backend.Environment) string {
-	return cache.Key("result", env.ImageID, opts.Command, opts.Dir, opts.Fingerprint, opts.Timeout.String())
+	parts := []string{"result", env.ImageID, opts.Command, opts.Dir, opts.Fingerprint, opts.Timeout.String()}
+	for _, m := range env.Mounts {
+		parts = append(parts, "mount", m.Target, m.Hash)
+	}
+	return cache.Key(parts...)
 }
 
 func (e *Engine) emit(ev Event) {

@@ -81,17 +81,25 @@ func (d *Docker) Available(ctx context.Context) error {
 
 // Run executes spec inside a new, automatically removed container. The
 // working directory is bind-mounted read-only, at the same path as on the
-// host when that is safe (see MountPoint). On timeout or cancellation the
+// host when that is safe (see MountPoint), and so are spec.Mounts. On timeout or cancellation the
 // container is force-removed.
 func (d *Docker) Run(ctx context.Context, spec Spec) (Result, error) {
 	if strings.Contains(spec.Dir, ":") {
 		return Result{}, fmt.Errorf("cannot mount %q: paths containing ':' are not supported", spec.Dir)
+	}
+	for _, m := range spec.Mounts {
+		if strings.Contains(m.Source, ":") || strings.Contains(m.Target, ":") {
+			return Result{}, fmt.Errorf("cannot mount %q at %q: paths containing ':' are not supported", m.Source, m.Target)
+		}
 	}
 	name := "gostest-" + randomHex(8)
 	args := []string{"run", "--rm", "--name", name, "--pull=never"}
 	if spec.Dir != "" {
 		target := MountPoint(spec.Dir)
 		args = append(args, "-v", spec.Dir+":"+target+":ro", "-w", target)
+	}
+	for _, m := range spec.Mounts {
+		args = append(args, "-v", m.Source+":"+m.Target+":ro")
 	}
 	args = append(args, "--entrypoint", "/bin/sh", spec.Image, "-c", spec.Command)
 
@@ -274,6 +282,7 @@ func (d *Docker) Provide(ctx context.Context, env Environment, cmds []string, re
 	out := env
 	out.Image, out.ImageID = tag, id
 	out.Packages = slices.Clone(env.Packages)
+	out.Mounts = slices.Clone(env.Mounts)
 	out.Provided = append(slices.Clone(env.Provided), found...)
 	return out, nil
 }

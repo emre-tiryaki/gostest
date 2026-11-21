@@ -251,11 +251,16 @@ type (
 		DurationMS float64 `json:"duration_ms"`
 	}
 	jsonEnv struct {
-		Image    string   `json:"image"`
-		ImageID  string   `json:"image_id,omitempty"`
-		Shell    string   `json:"shell,omitempty"`
-		Packages []string `json:"packages,omitempty"`
-		Provided []string `json:"provided,omitempty"`
+		Image    string      `json:"image"`
+		ImageID  string      `json:"image_id,omitempty"`
+		Shell    string      `json:"shell,omitempty"`
+		Packages []string    `json:"packages,omitempty"`
+		Provided []string    `json:"provided,omitempty"`
+		Mounts   []jsonMount `json:"mounts,omitempty"`
+	}
+	jsonMount struct {
+		Source string `json:"source"`
+		Target string `json:"target"`
 	}
 	jsonOutcome struct {
 		Distro      distro.Distro       `json:"distro"`
@@ -298,6 +303,9 @@ func JSON(w io.Writer, rep engine.Report) error {
 			cmp := o.Comparison
 			jo.Result, jo.Comparison = &res, &cmp
 			jo.Environment = &jsonEnv{Image: o.Env.Image, ImageID: o.Env.ImageID, Shell: o.Env.Shell, Packages: o.Env.Packages, Provided: o.Env.Provided}
+			for _, m := range o.Env.Mounts {
+				jo.Environment.Mounts = append(jo.Environment.Mounts, jsonMount{Source: m.Source, Target: m.Target})
+			}
 		}
 		doc.Outcomes = append(doc.Outcomes, jo)
 	}
