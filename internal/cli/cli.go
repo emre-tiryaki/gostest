@@ -175,6 +175,7 @@ type flags struct {
 	noAutoInst   bool
 	cleanup      bool
 	clearCache   bool
+	saveDeps     bool
 	format       string
 	color        string
 	context      int
@@ -221,6 +222,7 @@ func (a *App) parseFlags(args []string) (*flags, []string, error) {
 	fs.BoolVar(&f.noAutoInst, "no-auto-install", false, "")
 	fs.BoolVar(&f.cleanup, "cleanup", false, "")
 	fs.BoolVar(&f.clearCache, "clear-cache", false, "")
+	fs.BoolVar(&f.saveDeps, "save-deps", false, "")
 	fs.StringVar(&f.format, "format", "text", "")
 	fs.StringVar(&f.color, "color", "auto", "")
 	fs.IntVar(&f.context, "context", report.DefaultContext, "")

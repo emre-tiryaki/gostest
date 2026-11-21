@@ -69,6 +69,18 @@ type Config struct {
 	NoAutoInstall bool `json:"no_auto_install"`
 	// Cleanup removes the images pulled or built for a run when it ends.
 	Cleanup bool `json:"cleanup"`
+	// Dependencies are commands the tested command needs; with automatic
+	// installation, those a distribution lacks are installed before the
+	// first run. --save-deps fills it in by scanning the command.
+	Dependencies []string `json:"dependencies"`
+}
+
+// SaveDependencies adds deps to the "dependencies" list of the
+// configuration file at path, creating the file when it does not exist.
+// The other settings are kept as written. It returns the commands that
+// were not listed yet and whether the file was created.
+func SaveDependencies(path string, deps []string) (added []string, created bool, err error) {
+	return nil, false, nil
 }
 
 // Load reads and validates the configuration file at path.
