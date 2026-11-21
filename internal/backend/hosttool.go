@@ -78,3 +78,10 @@ func ClassifyHostTool(path string) (ToolKind, error) {
 	}
 	return ToolUnsupported, nil
 }
+
+// ScriptInterpreter returns the command that runs the script at path, from
+// its shebang line: "bash" for "#!/bin/bash" and "#!/usr/bin/env bash".
+// It is empty when path is not a script.
+func ScriptInterpreter(path string) (string, error) {
+	return "", nil
+}

@@ -60,6 +60,9 @@ type Context struct {
 	// NotProvided lists commands that were installed automatically
 	// without success because no package provides them.
 	NotProvided []string
+	// MountedInterpreters maps host tools mounted into the target to the
+	// interpreter of their shebang line.
+	MountedInterpreters map[string]string
 }
 
 // MaxCauses bounds the number of causes derived from stderr.

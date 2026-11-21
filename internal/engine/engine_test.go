@@ -924,9 +924,10 @@ func TestAutoInstallCancelled(t *testing.T) {
 
 // fakeHostTools resolves the commands in hashes to /host/bin/<name>.
 type fakeHostTools struct {
-	mu     sync.Mutex
-	hashes map[string]string // command -> content hash
-	calls  []string
+	mu           sync.Mutex
+	hashes       map[string]string // command -> content hash
+	interpreters map[string]string // command -> shebang interpreter
+	calls        []string
 }
 
 func (h *fakeHostTools) resolve(name string) (backend.Mount, bool) {
@@ -937,7 +938,7 @@ func (h *fakeHostTools) resolve(name string) (backend.Mount, bool) {
 	if !ok {
 		return backend.Mount{}, false
 	}
-	return backend.Mount{Source: "/host/bin/" + name, Target: backend.HostToolTarget + "/" + name, Hash: hash}, true
+	return backend.Mount{Source: "/host/bin/" + name, Target: backend.HostToolTarget + "/" + name, Hash: hash, Interpreter: h.interpreters[name]}, true
 }
 
 func (h *fakeHostTools) called() []string {
@@ -1189,5 +1190,60 @@ func TestCacheKeyIncludesMountTarget(t *testing.T) {
 	keys := map[string]bool{cacheKey(opts, env): true, cacheKey(opts, a): true, cacheKey(opts, b): true}
 	if len(keys) != 3 {
 		t.Errorf("mount targets must be part of the cache key")
+	}
+}
+
+// A shell that cannot find a mounted script's interpreter reports the script
+// itself as not found (busybox ash, dash): the interpreter is what is missing.
+func TestHostToolMissingInterpreterIsInstalled(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = notFoundResult("mytool")
+	c.results["a:latest+bash@mytool"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"bash"}
+	e, ht := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+	ht.interpreters = map[string]string{"mytool": "bash"}
+
+	rep := run(t, e, Options{Command: "mytool", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS after installing bash: %+v", o.Status, o)
+	}
+	if !slices.Equal(ht.called(), []string{"mytool", "bash"}) {
+		t.Errorf("HostTool calls = %v, want [mytool bash]", ht.called())
+	}
+	if calls := c.provided(); len(calls) != 1 || !slices.Equal(calls[0].cmds, []string{"bash"}) {
+		t.Fatalf("Provide calls = %+v, want one for bash", calls)
+	}
+	if !hasNote(o, explain.KindInstalled, "installed automatically because they were missing here: `bash`") {
+		t.Errorf("notes = %+v, want bash installed", o.Notes)
+	}
+}
+
+func TestHostToolMissingInterpreterIsExplained(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("mytool")
+	c.results["a:latest@mytool"] = notFoundResult("mytool")
+	e, ht := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+	ht.interpreters = map[string]string{"mytool": "bash"}
+
+	rep := run(t, e, Options{Command: "mytool", AutoInstall: true}, distros("a"))
+	o := rep.Outcomes[0]
+	if o.Status != Fail {
+		t.Fatalf("status %s, want FAIL", o.Status)
+	}
+	found := false
+	for _, r := range o.Reasons {
+		if strings.Contains(r.Message, "not installed here;") && strings.Contains(r.Message, "`mytool`") {
+			t.Errorf("reason %q: mytool is mounted, its interpreter is missing", r.Message)
+		}
+		if r.Kind == explain.KindMissingInterpreter && strings.Contains(r.Message, "`mytool`") && strings.Contains(r.Message, "`bash`") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("reasons = %+v, want a missing-interpreter reason naming mytool and bash", o.Reasons)
 	}
 }

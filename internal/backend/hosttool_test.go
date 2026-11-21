@@ -107,3 +107,32 @@ func TestClassifyHostToolErrors(t *testing.T) {
 		t.Error("unreadable file: want an error")
 	}
 }
+
+func TestScriptInterpreter(t *testing.T) {
+	tests := []struct{ content, want string }{
+		{"#!/bin/bash\necho hi\n", "bash"},
+		{"#!/bin/sh -e\n", "sh"},
+		{"#! /usr/bin/zsh\n", "zsh"},
+		{"#!/usr/bin/env bash\n", "bash"},
+		{"#!/usr/bin/env -S bash -eu\n", "bash"},
+		{"#!/usr/bin/env -i python3\n", "python3"},
+		{"#!/usr/bin/env\n", ""},
+		{"#!\n", ""},
+		{"#!/bin/bash", "bash"},
+		{"#!/bin/bash\r\n", "bash"},
+		{"echo hi\n", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got, err := ScriptInterpreter(writeFile(t, "s", tt.content, 0o755))
+		if err != nil {
+			t.Fatalf("%q: %v", tt.content, err)
+		}
+		if got != tt.want {
+			t.Errorf("ScriptInterpreter(%q) = %q, want %q", tt.content, got, tt.want)
+		}
+	}
+	if _, err := ScriptInterpreter(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("missing file: want an error")
+	}
+}

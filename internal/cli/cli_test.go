@@ -1023,3 +1023,14 @@ func TestHostToolResolverRejectsColons(t *testing.T) {
 		t.Error("paths containing ':' cannot be mounted and must not be resolved")
 	}
 }
+
+func TestHostToolResolverRecordsInterpreter(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mytool"), []byte("#!/usr/bin/env bash\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := HostToolResolver(lookIn(dir))("mytool")
+	if !ok || m.Interpreter != "bash" {
+		t.Errorf("mount = %+v, %v; want interpreter bash", m, ok)
+	}
+}

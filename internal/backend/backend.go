@@ -44,6 +44,9 @@ type Mount struct {
 	// Hash identifies the contents of Source, so cached results are not
 	// reused once the file changes.
 	Hash string `json:"hash,omitempty"`
+	// Interpreter is the command in the shebang line of a script, e.g.
+	// "bash"; empty for binaries.
+	Interpreter string `json:"interpreter,omitempty"`
 }
 
 // Result is what a command produced.
