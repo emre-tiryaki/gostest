@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/emre-tiryaki/gostest/internal/backend"
+	"github.com/emre-tiryaki/gostest/internal/config"
 	"github.com/emre-tiryaki/gostest/internal/deps"
 	"github.com/emre-tiryaki/gostest/internal/distro"
 	"github.com/emre-tiryaki/gostest/internal/engine"
@@ -1138,5 +1139,146 @@ func TestScannedDependenciesOptional(t *testing.T) {
 func TestNewScansDependencies(t *testing.T) {
 	if New("x").Deps == nil {
 		t.Error("New should set Deps")
+	}
+}
+
+// --- --save-deps ---
+
+func readConfig(t *testing.T, p string) config.Config {
+	t.Helper()
+	c, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", p, err)
+	}
+	return c
+}
+
+func TestSaveDepsCreatesConfig(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	h.paths["jq"], h.paths["sh"] = true, true
+	if err := os.WriteFile(filepath.Join(h.wd, "run.sh"), []byte("#!/bin/sh\njq . f\nnot-on-host x\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	expectExit(t, h, h.run("--save-deps", "./run.sh"), ExitOK)
+	p := filepath.Join(h.wd, ".gostest.json")
+	if got := readConfig(t, p).Dependencies; !slices.Equal(got, []string{"sh", "jq", "not-on-host"}) {
+		t.Errorf("dependencies = %q, want [sh jq not-on-host]", got)
+	}
+	out := h.stdout.String()
+	for _, want := range []string{p, "jq", "sh"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output should mention %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(h.stderr.String(), "not-on-host") {
+		t.Errorf("stderr should warn about commands missing on this machine:\n%s", h.stderr.String())
+	}
+	if len(h.engines) != 0 || len(h.host.specs) != 0 || len(h.containers.runs) != 0 {
+		t.Errorf("--save-deps ran something: engines %v, host runs %d, container runs %d", h.engines, len(h.host.specs), len(h.containers.runs))
+	}
+}
+
+func TestSaveDepsWithoutCommandCreatesEmptyConfig(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	expectExit(t, h, h.run("--save-deps"), ExitOK)
+	p := filepath.Join(h.wd, ".gostest.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "{\n  \"dependencies\": []\n}\n" {
+		t.Errorf("file = %q", b)
+	}
+	if !strings.Contains(h.stdout.String(), "created") {
+		t.Errorf("output should say the file was created:\n%s", h.stdout.String())
+	}
+
+	// Again: the file is kept as it is.
+	h.stdout.Reset()
+	expectExit(t, h, h.run("--save-deps"), ExitOK)
+	if b2, _ := os.ReadFile(p); string(b2) != string(b) {
+		t.Errorf("file changed: %q", b2)
+	}
+}
+
+func TestSaveDepsUpdatesNearestConfig(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	h.writeConfig(t, `{"distros": ["alpine"], "dependencies": ["git"]}`)
+	sub := filepath.Join(h.wd, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.wd = sub
+
+	expectExit(t, h, h.run("--save-deps", "curl x | jq ."), ExitOK)
+	c := readConfig(t, filepath.Join(filepath.Dir(sub), ".gostest.json"))
+	if !slices.Equal(c.Dependencies, []string{"git", "curl", "jq"}) || !slices.Equal(c.Distros, []string{"alpine"}) {
+		t.Errorf("config = %+v, want git, curl, jq and the distros kept", c)
+	}
+	if _, err := os.Stat(filepath.Join(sub, ".gostest.json")); err == nil {
+		t.Error("a new file was created instead of updating the nearest one")
+	}
+}
+
+func TestSaveDepsExplicitConfig(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	p := filepath.Join(t.TempDir(), "ci.json")
+	expectExit(t, h, h.run("--config", p, "--save-deps", "jq"), ExitOK)
+	if got := readConfig(t, p).Dependencies; !slices.Equal(got, []string{"jq"}) {
+		t.Errorf("dependencies = %q, want [jq]", got)
+	}
+}
+
+func TestSaveDepsNothingNew(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	h.writeConfig(t, `{"dependencies": ["jq"]}`)
+	expectExit(t, h, h.run("--save-deps", "jq ."), ExitOK)
+	if !strings.Contains(h.stdout.String(), "up to date") {
+		t.Errorf("output should say nothing changed:\n%s", h.stdout.String())
+	}
+}
+
+func TestSaveDepsInvalidConfigIsAUsageError(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	h.writeConfig(t, `{"distro": []}`)
+	expectExit(t, h, h.run("--save-deps", "jq"), ExitUsage)
+}
+
+func TestSaveDepsInUsage(t *testing.T) {
+	h := newHarness(t)
+	h.run("--help")
+	if !strings.Contains(h.stdout.String(), "--save-deps") {
+		t.Error("usage should document --save-deps")
+	}
+}
+
+func TestConfigDependenciesInstalledFirst(t *testing.T) {
+	h := newHarness(t)
+	h.paths["jq"] = true
+	h.writeConfig(t, `{"dependencies": ["jq", "not-on-host"]}`)
+	expectExit(t, h, h.run("-d", "alpine", "./run.sh"), ExitOK)
+	if len(h.containers.probes) != 1 {
+		t.Fatalf("probes = %q, want one", h.containers.probes)
+	}
+	if p := h.containers.probes[0]; !strings.Contains(p, "'jq'") || strings.Contains(p, "not-on-host") {
+		t.Errorf("probe = %q, want jq only", p)
+	}
+}
+
+func TestConfigAndScannedDependenciesMerge(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	h.paths["jq"], h.paths["curl"] = true, true
+	h.writeConfig(t, `{"dependencies": ["jq"]}`)
+	expectExit(t, h, h.run("-d", "alpine", "curl x | jq ."), ExitOK)
+	if len(h.containers.provides) != 1 || !slices.Equal(h.containers.provides[0], []string{"jq", "curl"}) {
+		t.Errorf("Provide calls = %q, want [[jq curl]]", h.containers.provides)
 	}
 }
