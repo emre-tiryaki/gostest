@@ -30,6 +30,20 @@ type Spec struct {
 	Dir string
 	// Timeout bounds the execution; zero means no limit.
 	Timeout time.Duration
+	// Mounts are host files mounted read-only into the container. The
+	// host runner ignores them.
+	Mounts []Mount
+}
+
+// Mount is a host file mounted read-only into containers.
+type Mount struct {
+	// Source is the path on the host.
+	Source string `json:"source"`
+	// Target is the path inside the container.
+	Target string `json:"target"`
+	// Hash identifies the contents of Source, so cached results are not
+	// reused once the file changes.
+	Hash string `json:"hash,omitempty"`
 }
 
 // Result is what a command produced.
@@ -62,6 +76,9 @@ type Environment struct {
 	// Provided lists the missing commands that were installed
 	// automatically, see Docker.Provide.
 	Provided []string `json:"provided,omitempty"`
+	// Mounts are the host tools mounted into every run because they were
+	// missing in the image.
+	Mounts []Mount `json:"mounts,omitempty"`
 }
 
 // ProbeCommand prints what /bin/sh resolves to. The ls fallback covers

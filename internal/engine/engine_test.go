@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -286,11 +287,11 @@ func TestSpecsPassedThrough(t *testing.T) {
 	opts := Options{Command: "ls", Dir: "/work/proj", Timeout: 42 * time.Second}
 	run(t, newEngine(host, c), opts, distros("a"))
 	wantHost := backend.Spec{Command: "ls", Dir: "/work/proj", Timeout: 42 * time.Second}
-	if len(host.specs) != 1 || host.specs[0] != wantHost {
+	if len(host.specs) != 1 || !reflect.DeepEqual(host.specs[0], wantHost) {
 		t.Errorf("host specs = %+v, want %+v", host.specs, wantHost)
 	}
 	wantRun := backend.Spec{Command: "ls", Dir: "/work/proj", Timeout: 42 * time.Second, Image: "gostest/a:123"}
-	if len(c.runs) != 1 || c.runs[0] != wantRun {
+	if len(c.runs) != 1 || !reflect.DeepEqual(c.runs[0], wantRun) {
 		t.Errorf("container specs = %+v, want %+v", c.runs, wantRun)
 	}
 }

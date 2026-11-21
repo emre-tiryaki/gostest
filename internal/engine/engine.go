@@ -130,6 +130,10 @@ type Engine struct {
 	Containers Containers
 	// Cache stores container results; nil disables caching.
 	Cache *cache.Store
+	// HostTool resolves a command missing in a distribution to a host file
+	// that can be mounted into its containers instead of installing a
+	// package; nil disables mounting.
+	HostTool func(name string) (backend.Mount, bool)
 	// Progress, if set, is called as distributions advance. Calls are
 	// serialised, so it does not need to be safe for concurrent use.
 	Progress func(Event)

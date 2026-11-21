@@ -74,6 +74,10 @@ type App struct {
 	Getwd         func() (string, error)
 	Getenv        func(key string) string
 	CacheDir      func() (string, error)
+	// HostTool resolves commands missing in a distribution to host files
+	// mounted into its containers, see HostToolResolver; nil disables
+	// mounting.
+	HostTool func(name string) (backend.Mount, bool)
 
 	// MaxFingerprintFiles overrides DefaultMaxFingerprintFiles when > 0.
 	MaxFingerprintFiles int
@@ -96,8 +100,15 @@ func New(version string) *App {
 		Getwd:    os.Getwd,
 		Getenv:   os.Getenv,
 		CacheDir: cache.DefaultDir,
+		HostTool: HostToolResolver(exec.LookPath),
 		Version:  version,
 	}
+}
+
+// HostToolResolver returns a resolver for App.HostTool that finds commands
+// on the host with lookPath.
+func HostToolResolver(lookPath func(string) (string, error)) func(name string) (backend.Mount, bool) {
+	return func(string) (backend.Mount, bool) { return backend.Mount{}, false }
 }
 
 func isTerminal(f *os.File) bool {
