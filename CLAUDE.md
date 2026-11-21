@@ -36,4 +36,5 @@ Data flows `cli → engine → backend`, then `compare → explain → report`:
 
 - Write everything (code, comments, docs, commit messages) in English.
 - Develop each feature in three commits: (1) minimal code, (2) complete tests for it (these may fail against the minimal code), (3) the full implementation that makes them pass. Fixes follow the same order: test commit, then fix commit.
+- each feature shoud be in a branch.
 - Commit at every step with descriptive conventional-style messages (`feat(pkg):`, `test(pkg):`, `fix(pkg):`, `docs:`, `build:`).
