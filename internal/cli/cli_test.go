@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/emre-tiryaki/gostest/internal/backend"
+	"github.com/emre-tiryaki/gostest/internal/deps"
 	"github.com/emre-tiryaki/gostest/internal/distro"
 	"github.com/emre-tiryaki/gostest/internal/engine"
 )
@@ -64,6 +66,7 @@ type fakeContainers struct {
 	prepares   []prepareCall
 	provides   [][]string
 	runs       []backend.Spec
+	probes     []string // dependency probe scripts
 	active     int
 	peak       int
 
@@ -119,7 +122,20 @@ func (c *fakeContainers) provideCount() int {
 	return len(c.provides)
 }
 
+var probeNameRe = regexp.MustCompile(`'([^']+)'`)
+
 func (c *fakeContainers) Run(ctx context.Context, spec backend.Spec) (backend.Result, error) {
+	if strings.HasPrefix(spec.Command, "# gostest: dependency probe") {
+		// Every probed command is missing.
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.probes = append(c.probes, spec.Command)
+		var out strings.Builder
+		for _, m := range probeNameRe.FindAllStringSubmatch(spec.Command, -1) {
+			out.WriteString(m[1] + "\n")
+		}
+		return backend.Result{Stdout: out.String()}, nil
+	}
 	c.mu.Lock()
 	c.runs = append(c.runs, spec)
 	c.active++
@@ -1074,5 +1090,53 @@ func TestHostToolResolverRecordsInterpreter(t *testing.T) {
 	m, ok := HostToolResolver(lookIn(dir))("mytool")
 	if !ok || m.Interpreter != "bash" {
 		t.Errorf("mount = %+v, %v; want interpreter bash", m, ok)
+	}
+}
+
+// --- dependencies found by scanning the command ---
+
+func TestScannedDependenciesInstalledFirst(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	h.paths["jq"], h.paths["sh"] = true, true
+	if err := os.WriteFile(filepath.Join(h.wd, "run.sh"), []byte("#!/bin/sh\njq . f\nnot-on-host x\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	expectExit(t, h, h.run("-d", "alpine", "./run.sh"), ExitOK)
+	if len(h.containers.probes) != 1 {
+		t.Fatalf("probes = %q, want one", h.containers.probes)
+	}
+	probe := h.containers.probes[0]
+	if !strings.Contains(probe, "'sh'") || !strings.Contains(probe, "'jq'") || strings.Contains(probe, "not-on-host") {
+		t.Errorf("probe = %q, want sh and jq but not a command the host lacks", probe)
+	}
+	if len(h.containers.provides) != 1 || !slices.Equal(h.containers.provides[0], []string{"sh", "jq"}) {
+		t.Errorf("Provide calls = %q, want [[sh jq]]", h.containers.provides)
+	}
+}
+
+func TestScannedDependenciesNeedAutoInstall(t *testing.T) {
+	h := newHarness(t)
+	h.app.Deps = deps.Scan
+	h.paths["jq"] = true
+	expectExit(t, h, h.run("-d", "alpine", "--no-auto-install", "jq . f"), ExitOK)
+	if len(h.containers.probes) != 0 {
+		t.Errorf("probes = %q, want none with --no-auto-install", h.containers.probes)
+	}
+}
+
+func TestScannedDependenciesOptional(t *testing.T) {
+	h := newHarness(t)
+	h.paths["jq"] = true
+	expectExit(t, h, h.run("-d", "alpine", "jq . f"), ExitOK)
+	if len(h.containers.probes) != 0 {
+		t.Errorf("probes = %q, want none when App.Deps is nil", h.containers.probes)
+	}
+}
+
+func TestNewScansDependencies(t *testing.T) {
+	if New("x").Deps == nil {
+		t.Error("New should set Deps")
 	}
 }
