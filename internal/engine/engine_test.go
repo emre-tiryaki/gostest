@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -62,8 +63,14 @@ type fakeContainers struct {
 	prepares     []prepareCall
 	provideCalls []provideCall
 	runs         []backend.Spec
-	active       int
-	peak         int
+
+	// Dependency probes are answered from present and recorded in probes,
+	// not in runs.
+	present   map[string][]string // image -> commands it has
+	probeFail map[string]bool     // image -> the probe exits 1
+	probes    []backend.Spec
+	active    int
+	peak      int
 }
 
 func newFakeContainers() *fakeContainers {
@@ -75,6 +82,8 @@ func newFakeContainers() *fakeContainers {
 		delay:      map[string]time.Duration{},
 		provides:   map[string][]string{},
 		provideErr: map[string]error{},
+		present:    map[string][]string{},
+		probeFail:  map[string]bool{},
 	}
 }
 
@@ -119,7 +128,36 @@ func (c *fakeContainers) provided() []provideCall {
 	return slices.Clone(c.provideCalls)
 }
 
+var probeNameRe = regexp.MustCompile(`'([^']+)'`)
+
+// probe answers a dependency probe: it prints the probed commands that
+// c.present does not list for the image.
+func (c *fakeContainers) probe(spec backend.Spec) backend.Result {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.probes = append(c.probes, spec)
+	if c.probeFail[spec.Image] {
+		return backend.Result{Stderr: "probe failed\n", ExitCode: 1}
+	}
+	var out strings.Builder
+	for _, m := range probeNameRe.FindAllStringSubmatch(spec.Command, -1) {
+		if !slices.Contains(c.present[spec.Image], m[1]) {
+			out.WriteString(m[1] + "\n")
+		}
+	}
+	return backend.Result{Stdout: out.String()}
+}
+
+func (c *fakeContainers) probeSpecs() []backend.Spec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.probes)
+}
+
 func (c *fakeContainers) Run(ctx context.Context, spec backend.Spec) (backend.Result, error) {
+	if strings.HasPrefix(spec.Command, probeMarker) {
+		return c.probe(spec), nil
+	}
 	c.mu.Lock()
 	c.runs = append(c.runs, spec)
 	c.active++
@@ -1245,5 +1283,256 @@ func TestHostToolMissingInterpreterIsExplained(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("reasons = %+v, want a missing-interpreter reason naming mytool and bash", o.Reasons)
+	}
+}
+
+// --- dependencies found before running ---
+
+func TestDependenciesInstalledBeforeFirstRun(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
+	c := newFakeContainers()
+	c.present["a:latest"] = []string{"sh"}
+	c.results["a:latest"] = notFoundResult("jq")
+	c.results["a:latest+jq"] = backend.Result{Stdout: "1.7\n"}
+	c.provides["a"] = []string{"jq"}
+
+	opts := Options{Command: "./run.sh", AutoInstall: true, Dependencies: []string{"sh", "jq"}}
+	o := run(t, newEngine(host, c), opts, distros("a")).Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS: %+v", o.Status, o)
+	}
+	calls := c.provided()
+	if len(calls) != 1 || !slices.Equal(calls[0].cmds, []string{"jq"}) || calls[0].image != "a:latest" {
+		t.Fatalf("Provide calls = %+v, want one for jq on a:latest", calls)
+	}
+	if c.runCount() != 1 || c.lastRun().Image != "a:latest+jq" {
+		t.Errorf("runs = %d (last %+v), want a single run on a:latest+jq", c.runCount(), c.lastRun())
+	}
+	if !hasNote(o, explain.KindInstalled, "installed automatically") || !hasNote(o, explain.KindInstalled, "`jq`") {
+		t.Errorf("notes = %+v, want an installed note naming jq", o.Notes)
+	}
+}
+
+func TestDependenciesProbeSpec(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stdout: "ok\n"}
+	c.present["a:latest"] = []string{"jq", "curl"}
+
+	opts := Options{Command: "x", Dir: "/w", Timeout: time.Minute, AutoInstall: true, Dependencies: []string{"jq", "curl"}}
+	run(t, newEngine(host, c), opts, distros("a"))
+	probes := c.probeSpecs()
+	if len(probes) != 1 {
+		t.Fatalf("probes = %d, want 1", len(probes))
+	}
+	p := probes[0]
+	if p.Image != "a:latest" || p.Dir != "" || len(p.Mounts) != 0 || p.Timeout <= 0 {
+		t.Errorf("probe spec = %+v, want image a:latest, no dir, no mounts and a timeout", p)
+	}
+	for _, name := range []string{"'jq'", "'curl'", "command -v"} {
+		if !strings.Contains(p.Command, name) {
+			t.Errorf("probe command %q does not contain %s", p.Command, name)
+		}
+	}
+}
+
+func TestDependenciesPresentAreNotInstalled(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stdout: "ok\n"}
+	c.present["a:latest"] = []string{"jq"}
+
+	opts := Options{Command: "jq", AutoInstall: true, Dependencies: []string{"jq"}}
+	o := run(t, newEngine(host, c), opts, distros("a")).Outcomes[0]
+	if o.Status != Pass || len(c.provided()) != 0 || c.runCount() != 1 {
+		t.Errorf("status %s, Provide calls %+v, runs %d: want PASS, none and 1", o.Status, c.provided(), c.runCount())
+	}
+	if len(o.Notes) != 0 {
+		t.Errorf("notes = %+v, want none", o.Notes)
+	}
+}
+
+func TestDependenciesMountedFromHost(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.0\n"}}
+	c := newFakeContainers()
+	c.results["a:latest@mytool"] = backend.Result{Stdout: "1.0\n"}
+	c.provides["a"] = []string{"mytool"}
+	e, ht := hostToolEngine(host, c, map[string]string{"mytool": "h1"})
+
+	opts := Options{Command: "./x.sh", AutoInstall: true, Dependencies: []string{"mytool"}}
+	o := run(t, e, opts, distros("a")).Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS: %+v", o.Status, o)
+	}
+	if !slices.Equal(ht.called(), []string{"mytool"}) || len(c.provided()) != 0 {
+		t.Errorf("HostTool calls %v, Provide calls %+v: want [mytool] and none", ht.called(), c.provided())
+	}
+	if c.runCount() != 1 || !reflect.DeepEqual(c.lastRun().Mounts, []backend.Mount{toolMount("mytool", "h1")}) {
+		t.Errorf("runs = %d, last %+v: want one run with mytool mounted", c.runCount(), c.lastRun())
+	}
+	if !hasNote(o, explain.KindInstalled, "mounted from the host") {
+		t.Errorf("notes = %+v, want a mounted note", o.Notes)
+	}
+}
+
+func TestDependenciesNeedAutoInstall(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"jq"}
+
+	run(t, newEngine(host, c), Options{Command: "jq", Dependencies: []string{"jq"}}, distros("a"))
+	if len(c.probeSpecs()) != 0 || len(c.provided()) != 0 {
+		t.Errorf("probes %d, Provide calls %+v: want none without AutoInstall", len(c.probeSpecs()), c.provided())
+	}
+}
+
+func TestNoDependenciesNoProbe(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stdout: "ok\n"}
+	run(t, newEngine(host, c), Options{Command: "x", AutoInstall: true}, distros("a"))
+	if n := len(c.probeSpecs()); n != 0 {
+		t.Errorf("probes = %d, want none", n)
+	}
+}
+
+func TestDependenciesNotRetriedAfterFailedProvide(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = notFoundResult("jq")
+	c.results["a:latest+jq"] = notFoundResult("jq") // no package provides jq
+
+	opts := Options{Command: "jq", AutoInstall: true, Dependencies: []string{"jq"}}
+	o := run(t, newEngine(host, c), opts, distros("a")).Outcomes[0]
+	if o.Status != Fail {
+		t.Fatalf("status %s, want FAIL", o.Status)
+	}
+	if calls := c.provided(); len(calls) != 1 {
+		t.Errorf("Provide calls = %+v, want jq tried once", calls)
+	}
+	found := false
+	for _, r := range o.Reasons {
+		if strings.Contains(r.Message, "no package providing it was found") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("reasons = %+v, want jq explained as not provided", o.Reasons)
+	}
+}
+
+func TestDependenciesFoundLaterStillInstalled(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest+jq"] = notFoundResult("yq")
+	c.results["a:latest+jq+yq"] = backend.Result{Stdout: "ok\n"}
+	c.provides["a"] = []string{"jq", "yq"}
+
+	opts := Options{Command: "x", AutoInstall: true, Dependencies: []string{"jq"}}
+	o := run(t, newEngine(host, c), opts, distros("a")).Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS after installing jq first and yq in a round: %+v", o.Status, o)
+	}
+	calls := c.provided()
+	if len(calls) != 2 || !slices.Equal(calls[0].cmds, []string{"jq"}) || !slices.Equal(calls[1].cmds, []string{"yq"}) {
+		t.Errorf("Provide calls = %+v, want jq then yq", calls)
+	}
+}
+
+func TestDependenciesProbeFailureFallsBack(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
+	c := newFakeContainers()
+	c.probeFail["a:latest"] = true
+	c.results["a:latest"] = notFoundResult("jq")
+	c.results["a:latest+jq"] = backend.Result{Stdout: "1.7\n"}
+	c.provides["a"] = []string{"jq"}
+
+	opts := Options{Command: "jq", AutoInstall: true, Dependencies: []string{"jq"}}
+	o := run(t, newEngine(host, c), opts, distros("a")).Outcomes[0]
+	if o.Status != Pass {
+		t.Fatalf("status %s, want PASS through the rounds: %+v", o.Status, o)
+	}
+	if c.runCount() != 2 {
+		t.Errorf("runs = %d, want 2: the failed probe must not install anything", c.runCount())
+	}
+}
+
+func TestDependenciesInvalidNamesNotProbed(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stdout: "ok\n"}
+	c.present["a:latest"] = []string{"jq"}
+	e := newEngine(host, c)
+	opts := Options{Command: "x", AutoInstall: true, Dependencies: []string{"jq", "bad name", "-x"}}
+	run(t, e, opts, distros("a"))
+	if calls := c.provided(); len(calls) != 0 {
+		t.Errorf("Provide calls = %+v, want none: invalid names are not probed", calls)
+	}
+	if p := c.probeSpecs(); len(p) != 1 || strings.Contains(p[0].Command, "bad name") || strings.Contains(p[0].Command, "'-x'") {
+		t.Errorf("probes = %+v, want one probing only jq", p)
+	}
+}
+
+func TestDependenciesProbeCached(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
+	c := newFakeContainers()
+	c.results["a:latest+jq"] = backend.Result{Stdout: "1.7\n"}
+	c.provides["a"] = []string{"jq"}
+	store, err := cache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEngine(host, c)
+	e.Cache = store
+
+	opts := Options{Command: "jq", AutoInstall: true, Dependencies: []string{"jq"}}
+	run(t, e, opts, distros("a"))
+	o := run(t, e, opts, distros("a")).Outcomes[0]
+	if n := len(c.probeSpecs()); n != 1 {
+		t.Errorf("probes = %d, want 1: the second run uses the cached probe", n)
+	}
+	if o.Status != Pass || !o.Cached {
+		t.Errorf("second outcome = %+v, want a cached PASS", o)
+	}
+
+	opts.NoCache = true
+	run(t, e, opts, distros("a"))
+	if n := len(c.probeSpecs()); n != 2 {
+		t.Errorf("probes = %d, want 2: NoCache probes again", n)
+	}
+}
+
+func TestDependenciesProbeCacheKeyedByDependencies(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.results["a:latest"] = backend.Result{Stdout: "ok\n"}
+	c.present["a:latest"] = []string{"jq", "yq"}
+	store, err := cache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEngine(host, c)
+	e.Cache = store
+
+	run(t, e, Options{Command: "x", AutoInstall: true, Dependencies: []string{"jq"}}, distros("a"))
+	run(t, e, Options{Command: "x", AutoInstall: true, Dependencies: []string{"jq", "yq"}}, distros("a"))
+	if n := len(c.probeSpecs()); n != 2 {
+		t.Errorf("probes = %d, want 2 for different dependencies", n)
+	}
+}
+
+func TestDependenciesProbeCancelled(t *testing.T) {
+	host := &fakeHost{result: backend.Result{Stdout: "ok\n"}}
+	c := newFakeContainers()
+	c.provides["a"] = []string{"jq"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := newEngine(host, c).Run(ctx, Options{Command: "x", AutoInstall: true, Dependencies: []string{"jq"}}, distros("a"))
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if calls := c.provided(); len(calls) != 0 {
+		t.Errorf("Provide calls = %+v after cancellation", calls)
 	}
 }
