@@ -224,7 +224,9 @@ to install a package whose name differs from the command.
 
 Shell keywords such as `[[`, paths and commands that are missing on the host
 as well are never installed. The derived images are cached like the ones of
-`--pkg`.
+`--pkg`, keyed by the set of commands whatever their order; when the set grows
+(a new dependency, say), the new image is built on the largest cached one whose
+commands it includes, so only the new commands are installed.
 
 #### Dependencies found before running
 
