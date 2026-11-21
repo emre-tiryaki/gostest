@@ -238,3 +238,35 @@ func TestScanDynamicPathsAreNotFollowed(t *testing.T) {
 		t.Errorf("Scan = %q, want nothing", got)
 	}
 }
+
+func TestCheckerFunctions(t *testing.T) {
+	check := `dep_ch() { command -v "$1" >/dev/null || exit 1; }` + "\n"
+	failover := `dep_ch_failover() {
+    [ -z "$1" ] && return 1
+    prog=${1%%,*}
+    command -v "$prog" >/dev/null 2>&1 && printf "%s" "$prog" && return 0
+    [ "$1" != "$prog" ] && dep_ch_failover "${1#*,}"
+}` + "\n"
+	tests := []struct {
+		name, script string
+		want         []string
+	}{
+		{"single argument", check + `dep_ch "patch"; dep_ch sed`, []string{"patch", "sed"}},
+		{"comma list", failover + `x=$(dep_ch_failover "mpv,vlc") || exit 1`, []string{"mpv", "vlc"}},
+		{"paths in a list are skipped", failover + `dep_ch_failover "iina,/Applications/IINA.app/Contents/MacOS/iina-cli,mpv"`, []string{"iina", "mpv"}},
+		{"dynamic arguments", check + `dep_ch "$menu"; dep_ch "mpv,$HOME/x"`, nil},
+		{"function keyword", "function need { type \"$1\" >/dev/null; }\nneed jq", []string{"jq"}},
+		{"which and hash", "a() { which \"$1\"; }\nb() { hash \"$1\"; }\na x; b y", []string{"which", "x", "y"}},
+		{"command -v with a literal is not a checker", "has_git() { command -v git; }\nhas_git foo", []string{"git"}},
+		{"options are skipped", check + `dep_ch -q jq`, []string{"jq"}},
+		{"unrelated function", "log() { echo \"$1\"; }\nlog hello", nil},
+		{"unused checker", check, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Commands(tt.script); !slices.Equal(got, tt.want) {
+				t.Errorf("Commands\n got %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+}
