@@ -442,7 +442,7 @@ func (a *App) options(f *flags, cfg config.Config, reg *distro.Registry, command
 	switch {
 	case f.set["timeout"]:
 		opts.Timeout = f.timeout
-	case cfg.Timeout.Duration > 0:
+	case cfg.Timeout != nil:
 		opts.Timeout = cfg.Timeout.Duration
 	}
 	switch {

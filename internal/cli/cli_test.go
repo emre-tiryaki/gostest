@@ -466,6 +466,15 @@ func TestZeroTimeoutDisablesIt(t *testing.T) {
 	}
 }
 
+func TestConfigZeroTimeoutDisablesIt(t *testing.T) {
+	h := newHarness(t)
+	h.writeConfig(t, `{"timeout": 0}`)
+	expectExit(t, h, h.run("-d", "alpine", "x"), ExitOK)
+	if got := h.containers.runs[0].Timeout; got != 0 {
+		t.Fatalf("timeout = %v, want none", got)
+	}
+}
+
 func TestConcurrencyPrecedence(t *testing.T) {
 	names := "alpine,debian,fedora,ubuntu,archlinux"
 	h := newHarness(t)

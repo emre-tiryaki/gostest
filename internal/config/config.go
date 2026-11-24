@@ -59,8 +59,8 @@ type Config struct {
 	Packages []string `json:"packages"`
 	// Concurrency limits parallel distributions; 0 means no limit.
 	Concurrency int `json:"concurrency"`
-	// Timeout bounds every run.
-	Timeout Duration `json:"timeout"`
+	// Timeout bounds every run; 0 disables the timeout and omitting it keeps the default.
+	Timeout *Duration `json:"timeout"`
 	// Engine is "docker" or "podman"; empty means auto-detect.
 	Engine string `json:"engine"`
 	// IgnoreStderr compares only stdout and exit codes.

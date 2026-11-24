@@ -45,7 +45,7 @@ func TestLoadFull(t *testing.T) {
 		CustomDistros: []distro.Distro{{Name: "mine", Image: "registry.local/mine:1", PackageManager: distro.APK}},
 		Packages:      []string{"curl", "alpine=bash"},
 		Concurrency:   3,
-		Timeout:       Duration{90 * time.Second},
+		Timeout:       &Duration{90 * time.Second},
 		Engine:        "podman",
 		IgnoreStderr:  true,
 		StrictOrder:   true,
