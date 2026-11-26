@@ -39,11 +39,16 @@ func withTimeout(ctx context.Context, d time.Duration) (context.Context, context
 // timeout expires the whole group is killed and the result is marked
 // TimedOut; when ctx itself ends, ctx.Err() is returned.
 func runProcess(ctx context.Context, timeout time.Duration, dir string, stdin io.Reader, name string, args ...string) (Result, error) {
+	return runCapped(ctx, MaxOutput, timeout, dir, stdin, name, args...)
+}
+
+// runCapped is runProcess capturing at most limit bytes per stream.
+func runCapped(ctx context.Context, limit int, timeout time.Duration, dir string, stdin io.Reader, name string, args ...string) (Result, error) {
 	runCtx, cancel := withTimeout(ctx, timeout)
 	defer cancel()
 
-	stdout := &limitedBuffer{limit: MaxOutput}
-	stderr := &limitedBuffer{limit: MaxOutput}
+	stdout := &limitedBuffer{limit: limit}
+	stderr := &limitedBuffer{limit: limit}
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdin = stdin

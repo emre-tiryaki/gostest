@@ -28,9 +28,10 @@ type Executor interface {
 // OSExecutor runs programs with os/exec.
 type OSExecutor struct{}
 
-// Exec implements Executor.
+// Exec implements Executor. It keeps one byte more than MaxOutput of each
+// stream, so that the caller can tell that output was cut.
 func (OSExecutor) Exec(ctx context.Context, stdin io.Reader, name string, args ...string) ([]byte, []byte, int, error) {
-	res, err := runProcess(ctx, 0, "", stdin, name, args...)
+	res, err := runCapped(ctx, MaxOutput+1, 0, "", stdin, name, args...)
 	if err != nil {
 		return []byte(res.Stdout), []byte(res.Stderr), -1, err
 	}
