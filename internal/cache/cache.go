@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 )
 
@@ -27,6 +26,10 @@ const FormatVersion = 1
 var ErrTooManyFiles = errors.New("too many files to fingerprint")
 
 var keyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+
+// ownFileRe matches the files Clear may remove: entries stored under a Key
+// and the temporary files of Put.
+var ownFileRe = regexp.MustCompile(`^([0-9a-f]{64}\.json|\.tmp-[0-9]+)$`)
 
 // Store is a directory of cached JSON values. It is safe for concurrent use
 // by multiple goroutines and processes: writes are atomic renames.
@@ -143,7 +146,8 @@ func (s *Store) Put(key string, v any) error {
 	return nil
 }
 
-// Clear removes every entry from the store.
+// Clear removes the entries stored under a Key and leftover temporary files.
+// Other files are kept: the directory may be shared with something else.
 func (s *Store) Clear() error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -151,7 +155,7 @@ func (s *Store) Clear() error {
 	}
 	for _, e := range entries {
 		n := e.Name()
-		if e.Type().IsRegular() && (strings.HasSuffix(n, ".json") || strings.HasPrefix(n, ".tmp-")) {
+		if e.Type().IsRegular() && ownFileRe.MatchString(n) {
 			if err := os.Remove(filepath.Join(s.dir, n)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("clearing cache: %w", err)
 			}
