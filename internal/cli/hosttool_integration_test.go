@@ -132,12 +132,29 @@ func TestIntegrationHostToolDifferencesAreReported(t *testing.T) {
 	// The same script, but the shells it runs under differ.
 	writeTool(t, bin, "gostest-shell", "#!/bin/sh\nreadlink -f /bin/sh\n")
 
+	// What the host's /bin/sh resolves to decides which distributions
+	// differ: on a host whose /bin/sh is dash (Debian, Ubuntu) debian
+	// matches the reference.
+	hostSh, err := filepath.EvalSymlinks("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wants []string
+	for _, sh := range []string{"/bin/busybox", "/usr/bin/dash"} {
+		if sh != hostSh {
+			wants = append(wants, "+ "+sh)
+		}
+	}
+
 	code, out := e.run(t, "gostest-shell")
 	expectCode(t, code, ExitFailed, out)
 	if !strings.Contains(out, "mounted from the host") {
 		t.Errorf("want the tool mounted:\n%s", out)
 	}
-	for _, want := range []string{"+ /bin/busybox", "+ /usr/bin/dash"} {
+	if !strings.Contains(out, "- "+hostSh) {
+		t.Errorf("diff should show the reference %q:\n%s", "- "+hostSh, out)
+	}
+	for _, want := range wants {
 		if !strings.Contains(out, want) {
 			t.Errorf("diff should show %q:\n%s", want, out)
 		}
