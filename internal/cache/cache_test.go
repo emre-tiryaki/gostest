@@ -414,3 +414,29 @@ func TestFingerprintUnreadableFile(t *testing.T) {
 		t.Fatalf("an unreadable file must not fail the fingerprint: %v", err)
 	}
 }
+
+func TestClearKeepsForeignFiles(t *testing.T) {
+	s, dir := openStore(t)
+	if err := s.Put(Key("entry"), value{}); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []string{"package.json", ".gostest.json", ".tmp-notes", "abc123.json"}
+	for _, n := range append([]string{".tmp-123456"}, foreign...) {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range foreign {
+		if _, err := os.Stat(filepath.Join(dir, n)); err != nil {
+			t.Errorf("Clear removed %s, which is not a cache file", n)
+		}
+	}
+	for _, n := range []string{Key("entry") + ".json", ".tmp-123456"} {
+		if _, err := os.Stat(filepath.Join(dir, n)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("Clear kept %s", n)
+		}
+	}
+}
