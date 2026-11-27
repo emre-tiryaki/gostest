@@ -258,22 +258,18 @@ func diagnose(line string, c Context, busybox bool) (Reason, bool) {
 // -> bash). Shell keywords such as [[, paths and names that are not safe to
 // look up are left out.
 func MissingCommands(ref, got backend.Result) []string {
-	onHost := notFoundNames(newLines("", ref.Stderr))
-	return slices.DeleteFunc(notFoundNames(newLines(ref.Stderr, got.Stderr)), func(name string) bool {
-		return slices.Contains(onHost, name)
-	})
-}
-
-// notFoundNames returns the commands that lines report as not found.
-func notFoundNames(lines []string) []string {
-	var out []string
+	var onHost, out []string
+	if ref.Stderr != "" {
+		// With an empty reference, these are all the names ref reports.
+		onHost = MissingCommands(backend.Result{}, ref)
+	}
 	add := func(name string) {
-		if _, bashism := bashisms[name]; bashism || !distro.ValidCommandName(name) || slices.Contains(out, name) {
+		if _, bashism := bashisms[name]; bashism || !distro.ValidCommandName(name) || slices.Contains(onHost, name) || slices.Contains(out, name) {
 			return
 		}
 		out = append(out, name)
 	}
-	for _, line := range lines {
+	for _, line := range newLines(ref.Stderr, got.Stderr) {
 		if m := reBadInterpreter.FindStringSubmatch(line); m != nil {
 			add(path.Base(m[2]))
 			continue
