@@ -135,7 +135,7 @@ var wrappers = map[string]wrapper{
 	"nohup":   {},
 	"setsid":  {},
 	"stdbuf":  {argOpts: "ioe", longArgOpts: "input output error"},
-	"sudo": {argOpts: "ugCDhprtUT", longArgOpts: "user group close-from chdir host prompt role type other-user command-timeout chroot"},
+	"sudo":    {argOpts: "ugCDhprtUT", longArgOpts: "user group close-from chdir host prompt role type other-user command-timeout chroot"},
 	"time":    {argOpts: "fo", longArgOpts: "format output"},
 	"timeout": {argOpts: "sk", longArgOpts: "signal kill-after", skipFirst: true},
 	"xargs":   {argOpts: "adEILnPs", longArgOpts: "arg-file delimiter max-args max-procs max-chars process-slot-var"},
