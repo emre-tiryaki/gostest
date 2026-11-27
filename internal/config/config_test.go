@@ -377,3 +377,37 @@ func TestSaveDependenciesMissingDirectory(t *testing.T) {
 		t.Error("want an error for a missing directory")
 	}
 }
+
+func TestSaveDependenciesFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "shared", "base.json")
+	if err := os.Mkdir(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"distros":["alpine"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, FileName)
+	if err := os.Symlink(filepath.Join("shared", "base.json"), link); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, created, err := SaveDependencies(link, []string{"jq"}); err != nil || created {
+		t.Fatalf("SaveDependencies: created = %v, err = %v", created, err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("%s is no longer a symlink", link)
+	}
+	c, err := Load(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Dependencies) != 1 || c.Dependencies[0] != "jq" {
+		t.Errorf("target dependencies = %q, want [jq]", c.Dependencies)
+	}
+}
