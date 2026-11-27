@@ -137,6 +137,13 @@ func SaveDependencies(path string, deps []string) (added []string, created bool,
 	if err != nil {
 		return nil, false, err
 	}
+	// Renaming over a symlink would replace the link itself, so write to
+	// the file it points to.
+	if !created {
+		if path, err = filepath.EvalSymlinks(path); err != nil {
+			return nil, false, err
+		}
+	}
 	if err := writeFile(path, out, mode); err != nil {
 		return nil, false, err
 	}
