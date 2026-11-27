@@ -252,10 +252,20 @@ func diagnose(line string, c Context, busybox bool) (Reason, bool) {
 
 // MissingCommands returns the commands that got reports as not found while
 // the reference does not, without duplicates and in order of appearance:
-// the candidates for installing automatically. A missing shebang
-// interpreter counts by its base name (/bin/bash -> bash). Shell keywords
-// such as [[, paths and names that are not safe to look up are left out.
+// the candidates for installing automatically. Shells word these errors
+// differently, so the names the reference reports are compared, not its
+// lines. A missing shebang interpreter counts by its base name (/bin/bash
+// -> bash). Shell keywords such as [[, paths and names that are not safe to
+// look up are left out.
 func MissingCommands(ref, got backend.Result) []string {
+	onHost := notFoundNames(newLines("", ref.Stderr))
+	return slices.DeleteFunc(notFoundNames(newLines(ref.Stderr, got.Stderr)), func(name string) bool {
+		return slices.Contains(onHost, name)
+	})
+}
+
+// notFoundNames returns the commands that lines report as not found.
+func notFoundNames(lines []string) []string {
 	var out []string
 	add := func(name string) {
 		if _, bashism := bashisms[name]; bashism || !distro.ValidCommandName(name) || slices.Contains(out, name) {
@@ -263,7 +273,7 @@ func MissingCommands(ref, got backend.Result) []string {
 		}
 		out = append(out, name)
 	}
-	for _, line := range newLines(ref.Stderr, got.Stderr) {
+	for _, line := range lines {
 		if m := reBadInterpreter.FindStringSubmatch(line); m != nil {
 			add(path.Base(m[2]))
 			continue
