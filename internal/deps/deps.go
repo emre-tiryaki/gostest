@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/emre-tiryaki/gostest/internal/backend"
@@ -115,6 +116,9 @@ type wrapper struct {
 	// argOpts are the single-letter options that take the next word as
 	// their value.
 	argOpts string
+	// longArgOpts are the space separated long options that take the
+	// next word as their value, unless it is given as --name=value.
+	longArgOpts string
 	// skipFirst is set when the first operand is not the command, as the
 	// duration of timeout.
 	skipFirst bool
@@ -123,18 +127,31 @@ type wrapper struct {
 var wrappers = map[string]wrapper{
 	"command": {},
 	"doas":    {argOpts: "uC"},
-	"env":     {argOpts: "uCS"},
+	"env":     {argOpts: "uCS", longArgOpts: "unset chdir split-string"},
 	"exec":    {argOpts: "a"},
-	"flock":   {argOpts: "wEn", skipFirst: true},
-	"ionice":  {argOpts: "cnp"},
-	"nice":    {argOpts: "n"},
+	"flock":   {argOpts: "wEn", longArgOpts: "timeout wait conflict-exit-code", skipFirst: true},
+	"ionice":  {argOpts: "cnp", longArgOpts: "class classdata pid pgid uid"},
+	"nice":    {argOpts: "n", longArgOpts: "adjustment"},
 	"nohup":   {},
 	"setsid":  {},
-	"stdbuf":  {argOpts: "ioe"},
-	"sudo":    {argOpts: "ugCDhprtUT"},
-	"time":    {argOpts: "fo"},
-	"timeout": {argOpts: "sk", skipFirst: true},
-	"xargs":   {argOpts: "adEILnPs"},
+	"stdbuf":  {argOpts: "ioe", longArgOpts: "input output error"},
+	"sudo": {argOpts: "ugCDhprtUT", longArgOpts: "user group close-from chdir host prompt role type " +
+		"other-user command-timeout chroot"},
+	"time":    {argOpts: "fo", longArgOpts: "format output"},
+	"timeout": {argOpts: "sk", longArgOpts: "signal kill-after", skipFirst: true},
+	"xargs":   {argOpts: "adEILnPs", longArgOpts: "arg-file delimiter max-args max-procs max-chars process-slot-var"},
+}
+
+// takesValue reports whether the option word opt of the wrapper takes the
+// next word as its value.
+func (w wrapper) takesValue(opt string) bool {
+	if long, ok := strings.CutPrefix(opt, "--"); ok {
+		return slices.Contains(strings.Fields(w.longArgOpts), long)
+	}
+	// In a group such as -rn, the first option that takes a value uses
+	// the rest of the word, or the next word when it is the last letter.
+	i := strings.IndexAny(opt[1:], w.argOpts)
+	return i >= 0 && i == len(opt)-2
 }
 
 var assignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
@@ -759,7 +776,7 @@ func (p *parser) arg(i int) int {
 		case opt:
 			if p.cur == "command" && strings.ContainsAny(w[1:], "vV") {
 				p.cur = "command -v"
-			} else if len(w) == 2 && strings.IndexByte(spec.argOpts, w[1]) >= 0 {
+			} else if spec.takesValue(w) {
 				p.skipNext = true
 			}
 		case p.cur == "env" && assignRe.MatchString(w):
