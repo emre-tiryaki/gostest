@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -1256,5 +1258,21 @@ func TestProvideKeepsMounts(t *testing.T) {
 	}
 	if !slices.Equal(got.Mounts, env.Mounts) {
 		t.Errorf("Mounts = %v, want %v", got.Mounts, env.Mounts)
+	}
+}
+
+func TestRunMarksOutputCappedByTheOSExecutor(t *testing.T) {
+	// A stand-in engine that writes more than MaxOutput to stdout.
+	engine := filepath.Join(t.TempDir(), "docker")
+	script := fmt.Sprintf("#!/bin/sh\nhead -c %d /dev/zero\n", MaxOutput+10)
+	if err := os.WriteFile(engine, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := NewDocker(engine).Run(context.Background(), Spec{Image: "alpine", Command: "true"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Stdout) != MaxOutput || !res.Truncated {
+		t.Fatalf("len(Stdout) = %d, Truncated = %v, want %d and true", len(res.Stdout), res.Truncated, MaxOutput)
 	}
 }
