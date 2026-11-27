@@ -75,6 +75,11 @@ func runProcess(ctx context.Context, timeout time.Duration, dir string, stdin io
 		res.ExitCode = exitCode(exitErr)
 		return res, nil
 	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The command succeeded, but a process it left in the background
+		// still held the output pipes after WaitDelay.
+		return res, nil
+	}
 	return res, err
 }
 

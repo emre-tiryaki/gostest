@@ -162,3 +162,14 @@ func TestLocalInheritsEnvironment(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q", res.Stdout, "hello")
 	}
 }
+
+func TestLocalBackgroundProcessHoldingOutput(t *testing.T) {
+	// The shell exits at once; the background process keeps the pipes open.
+	res, err := Local{}.Run(context.Background(), Spec{Command: "sleep 4 & echo hi"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ExitCode != 0 || res.TimedOut || res.Stdout != "hi\n" {
+		t.Fatalf("result = %+v, want exit 0 and stdout %q", res, "hi\n")
+	}
+}
