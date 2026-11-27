@@ -496,3 +496,21 @@ func TestMountedScriptWithMissingInterpreter(t *testing.T) {
 		}
 	}
 }
+
+func TestMissingCommandsSkipsThoseTheHostWordsDifferently(t *testing.T) {
+	bash := "/bin/sh: line 1: jqq: command not found\n"
+	dash := "/bin/sh: 1: jqq: not found\n"
+	for _, tt := range []struct{ name, ref, got string }{
+		{"bash host", bash, dash},
+		{"dash host", dash, bash},
+		{"busybox target", bash, "/bin/sh: jqq: not found\n"},
+		{"env on the host", "env: 'jqq': No such file or directory\n", dash},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MissingCommands(backend.Result{Stderr: tt.ref}, backend.Result{Stderr: tt.got + "sh: fzf: not found\n"})
+			if !slices.Equal(got, []string{"fzf"}) {
+				t.Errorf("MissingCommands = %q, want [fzf]: jqq is missing on the host too", got)
+			}
+		})
+	}
+}
