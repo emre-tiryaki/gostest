@@ -448,8 +448,8 @@ func (a *App) options(f *flags, cfg config.Config, reg *distro.Registry, command
 	switch {
 	case f.set["concurrency"]:
 		opts.Concurrency = f.concurrency
-	case cfg.Concurrency > 0:
-		opts.Concurrency = cfg.Concurrency
+	case cfg.Concurrency != nil:
+		opts.Concurrency = *cfg.Concurrency
 	}
 
 	distros := reg.Defaults()
