@@ -251,6 +251,20 @@ func TestDockerRunArguments(t *testing.T) {
 	}
 }
 
+func TestDockerRunUsesAnInitProcess(t *testing.T) {
+	f := newFakeEngine()
+	d := newTestDocker(f)
+	if _, err := d.Run(context.Background(), Spec{Command: "true", Image: "alpine"}); err != nil {
+		t.Fatal(err)
+	}
+	args := f.callsTo("run")[0]
+	// Without an init the shell is PID 1, which ignores signals it sends
+	// to itself. The option has to precede the image to apply to docker.
+	if i := slices.Index(args, "--init"); i < 0 || i > slices.Index(args, "alpine") {
+		t.Errorf("args %v: want --init before the image", args)
+	}
+}
+
 func TestDockerRunWithoutDirHasNoMount(t *testing.T) {
 	f := newFakeEngine()
 	d := newTestDocker(f)

@@ -57,6 +57,19 @@ func TestIntegrationAlpine(t *testing.T) {
 	}
 }
 
+func TestIntegrationSignalsEndTheShell(t *testing.T) {
+	d := realDocker(t)
+	env := prepare(t, d, alpine, nil)
+	res, err := d.Run(context.Background(), Spec{Image: env.Image, Command: "echo before; kill -TERM $$; echo after"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As on the host: 128 + SIGTERM, and nothing runs afterwards.
+	if res.Stdout != "before\n" || res.ExitCode != 143 {
+		t.Fatalf("unexpected result %+v", res)
+	}
+}
+
 func TestIntegrationMountsDirReadOnly(t *testing.T) {
 	d := realDocker(t)
 	env := prepare(t, d, alpine, nil)
