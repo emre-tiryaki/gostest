@@ -94,7 +94,9 @@ func (d *Docker) Run(ctx context.Context, spec Spec) (Result, error) {
 		}
 	}
 	name := "gostest-" + randomHex(8)
-	args := []string{"run", "--rm", "--name", name, "--pull=never"}
+	// --init keeps the shell from being PID 1, which the kernel shields from
+	// signals it does not handle, unlike the shell of the reference run.
+	args := []string{"run", "--rm", "--init", "--name", name, "--pull=never"}
 	if spec.Dir != "" {
 		target := MountPoint(spec.Dir)
 		args = append(args, "-v", spec.Dir+":"+target+":ro", "-w", target)
