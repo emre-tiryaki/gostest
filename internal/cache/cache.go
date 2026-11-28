@@ -170,7 +170,8 @@ const MaxHashedFileSize = 1 << 20
 
 // Fingerprint summarises the tree under dir: names, modes, symlink targets
 // and file contents (size and mtime for files above MaxHashedFileSize). It
-// does not follow symlinks and skips .git directories. The result does not
+// follows dir when it is a symlink but no symlinks below it, and skips .git
+// directories. The result does not
 // depend on where dir is. It fails with ErrTooManyFiles when the tree has
 // more than maxFiles entries.
 func Fingerprint(dir string, maxFiles int) (string, error) {
@@ -180,6 +181,10 @@ func Fingerprint(dir string, maxFiles int) (string, error) {
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("%s is not a directory", dir)
+	}
+	// WalkDir does not descend into a root that is a symlink.
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return "", err
 	}
 
 	h := sha256.New()

@@ -361,6 +361,22 @@ func TestFingerprintDoesNotFollowSymlinks(t *testing.T) {
 	}
 }
 
+func TestFingerprintSymlinkedRoot(t *testing.T) {
+	dir := project(t)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	before := fingerprint(t, link)
+	if before != fingerprint(t, dir) {
+		t.Fatal("a symlink to a tree should have the fingerprint of the tree")
+	}
+	writeFile(t, filepath.Join(dir, "run.sh"), "#!/bin/sh\necho changed\n", 0o755)
+	if fingerprint(t, link) == before {
+		t.Fatal("changes behind a symlinked root must change the fingerprint")
+	}
+}
+
 func TestFingerprintIgnoresGitDirectory(t *testing.T) {
 	dir := project(t)
 	writeFile(t, filepath.Join(dir, ".git", "HEAD"), "ref: refs/heads/main\n", 0o644)
