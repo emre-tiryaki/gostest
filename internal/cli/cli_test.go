@@ -493,6 +493,23 @@ func TestConcurrencyPrecedence(t *testing.T) {
 	}
 }
 
+func TestConfigZeroConcurrencyMeansNoLimit(t *testing.T) {
+	// More distributions than the default limit allows at once.
+	var custom, names []string
+	for i := range DefaultConcurrency() + 2 {
+		name := fmt.Sprintf("d%d", i)
+		custom = append(custom, fmt.Sprintf(`{"name": %q, "image": "i:1", "package_manager": "apk"}`, name))
+		names = append(names, name)
+	}
+	h := newHarness(t)
+	h.containers.delay = 100 * time.Millisecond
+	h.writeConfig(t, `{"concurrency": 0, "custom_distros": [`+strings.Join(custom, ",")+`]}`)
+	expectExit(t, h, h.run("-d", strings.Join(names, ","), "x"), ExitOK)
+	if h.containers.peak != len(names) {
+		t.Fatalf("config concurrency 0: peak = %d, want %d", h.containers.peak, len(names))
+	}
+}
+
 func TestDefaultConcurrency(t *testing.T) {
 	if DefaultConcurrency() != max(runtime.NumCPU(), 2) {
 		t.Fatalf("DefaultConcurrency = %d", DefaultConcurrency())
