@@ -442,9 +442,9 @@ func (e *Engine) execute(ctx context.Context, opts Options, spec backend.Spec, o
 	key := cacheKey(opts, o.Env)
 	o.Cached = false
 	if cacheable && !opts.NoCache {
-		var cached backend.Result
+		var cached cachedResult
 		if ok, _ := e.Cache.Get(key, &cached); ok {
-			o.Result, o.Cached = cached, true
+			o.Result, o.Cached = cached.result(), true
 			e.emit(Event{Distro: o.Distro.Name, Stage: StageCached})
 			return nil
 		}
@@ -460,9 +460,27 @@ func (e *Engine) execute(ctx context.Context, opts Options, spec backend.Spec, o
 	o.Result = res
 	if cacheable && !res.TimedOut {
 		// A failed write only costs a re-run next time.
-		_ = e.Cache.Put(key, res)
+		_ = e.Cache.Put(key, newCachedResult(res))
 	}
 	return nil
+}
+
+// cachedResult is how a result is stored: the output as bytes (base64 in
+// JSON), because a JSON string would replace bytes that are not valid UTF-8.
+type cachedResult struct {
+	backend.Result
+	Stdout []byte `json:"stdout"`
+	Stderr []byte `json:"stderr"`
+}
+
+func newCachedResult(r backend.Result) cachedResult {
+	return cachedResult{Result: r, Stdout: []byte(r.Stdout), Stderr: []byte(r.Stderr)}
+}
+
+func (c cachedResult) result() backend.Result {
+	r := c.Result
+	r.Stdout, r.Stderr = string(c.Stdout), string(c.Stderr)
+	return r
 }
 
 // mountedInterpreter returns the interpreter of the host script mounted as
@@ -509,7 +527,9 @@ func commandList(cmds []string) string {
 // working directory (path and contents), timeout and mounted host tools
 // (where and with which contents).
 func cacheKey(opts Options, env backend.Environment) string {
-	parts := []string{"result", env.ImageID, opts.Command, opts.Dir, opts.Fingerprint, opts.Timeout.String()}
+	// The first part changes with the layout of cachedResult, so entries
+	// stored in another layout are not read.
+	parts := []string{"result-v2", env.ImageID, opts.Command, opts.Dir, opts.Fingerprint, opts.Timeout.String()}
 	for _, m := range env.Mounts {
 		parts = append(parts, "mount", m.Target, m.Hash)
 	}
