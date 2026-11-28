@@ -331,6 +331,9 @@ func (e *Engine) runTarget(ctx context.Context, opts Options, spec backend.Spec,
 		o.Reasons = explain.Explain(ref.result, o.Result, o.Comparison, ec)
 	}
 	o.Notes = append(installNotes(st.mounted, o.Env.Provided, st.failed, st.err), explain.Notes(o.Comparison, ec)...)
+	if o.Status == Pass && (ref.result.Truncated || o.Result.Truncated) {
+		o.Notes = append(o.Notes, explain.Reason{Kind: explain.KindTruncated, Message: fmt.Sprintf("only the first %d MiB of each stream were compared because output was truncated; later differences are not detected", backend.MaxOutput>>20)})
+	}
 	e.emit(Event{Distro: d.Name, Stage: StageDone, Status: o.Status})
 	return o
 }
