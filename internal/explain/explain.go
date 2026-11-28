@@ -252,13 +252,19 @@ func diagnose(line string, c Context, busybox bool) (Reason, bool) {
 
 // MissingCommands returns the commands that got reports as not found while
 // the reference does not, without duplicates and in order of appearance:
-// the candidates for installing automatically. A missing shebang
-// interpreter counts by its base name (/bin/bash -> bash). Shell keywords
-// such as [[, paths and names that are not safe to look up are left out.
+// the candidates for installing automatically. Shells word these errors
+// differently, so the names the reference reports are compared, not its
+// lines. A missing shebang interpreter counts by its base name (/bin/bash
+// -> bash). Shell keywords such as [[, paths and names that are not safe to
+// look up are left out.
 func MissingCommands(ref, got backend.Result) []string {
-	var out []string
+	var onHost, out []string
+	if ref.Stderr != "" {
+		// With an empty reference, these are all the names ref reports.
+		onHost = MissingCommands(backend.Result{}, ref)
+	}
 	add := func(name string) {
-		if _, bashism := bashisms[name]; bashism || !distro.ValidCommandName(name) || slices.Contains(out, name) {
+		if _, bashism := bashisms[name]; bashism || !distro.ValidCommandName(name) || slices.Contains(onHost, name) || slices.Contains(out, name) {
 			return
 		}
 		out = append(out, name)
