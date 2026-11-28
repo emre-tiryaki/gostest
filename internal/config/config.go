@@ -57,8 +57,8 @@ type Config struct {
 	CustomDistros []distro.Distro `json:"custom_distros"`
 	// Packages to install, as accepted by --pkg.
 	Packages []string `json:"packages"`
-	// Concurrency limits parallel distributions; 0 means no limit.
-	Concurrency int `json:"concurrency"`
+	// Concurrency limits parallel distributions; 0 means no limit and omitting it keeps the default.
+	Concurrency *int `json:"concurrency"`
 	// Timeout bounds every run; 0 disables the timeout and omitting it keeps the default.
 	Timeout *Duration `json:"timeout"`
 	// Engine is "docker" or "podman"; empty means auto-detect.
@@ -253,8 +253,8 @@ func parse(b []byte) (Config, error) {
 }
 
 func (c Config) validate() error {
-	if c.Concurrency < 0 {
-		return fmt.Errorf("concurrency must not be negative, got %d", c.Concurrency)
+	if c.Concurrency != nil && *c.Concurrency < 0 {
+		return fmt.Errorf("concurrency must not be negative, got %d", *c.Concurrency)
 	}
 	switch c.Engine {
 	case "", "docker", "podman":
