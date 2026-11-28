@@ -578,6 +578,27 @@ func TestNoCacheRunsAgainAndRefreshes(t *testing.T) {
 	}
 }
 
+func TestCacheKeepsOutputThatIsNotUTF8(t *testing.T) {
+	want := backend.Result{Stdout: "caf\xe9 \xff\x00\n", Stderr: "\xfe\n"}
+	c := newFakeContainers()
+	c.results["a:latest"] = want
+	e := cachedEngine(t, &fakeHost{result: want}, c)
+	opts := Options{Command: "x", Fingerprint: "fp"}
+	run(t, e, opts, distros("a"))
+
+	rep := run(t, e, opts, distros("a"))
+	o := rep.Outcomes[0]
+	if !o.Cached {
+		t.Fatal("second run should be served from the cache")
+	}
+	if o.Result.Stdout != want.Stdout || o.Result.Stderr != want.Stderr {
+		t.Fatalf("cached output = %q, %q, want %q, %q", o.Result.Stdout, o.Result.Stderr, want.Stdout, want.Stderr)
+	}
+	if o.Status != Pass {
+		t.Fatalf("status = %s, want PASS", o.Status)
+	}
+}
+
 func TestTimeoutsAreNotCached(t *testing.T) {
 	c := newFakeContainers()
 	c.results["a:latest"] = backend.Result{TimedOut: true, ExitCode: backend.ExitTimeout}
