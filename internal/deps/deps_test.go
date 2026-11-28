@@ -270,3 +270,31 @@ func TestCheckerFunctions(t *testing.T) {
 		})
 	}
 }
+
+func TestWrapperOptionsWithSeparateValues(t *testing.T) {
+	tests := []struct {
+		script string
+		want   []string
+	}{
+		{"timeout --signal KILL --kill-after 3 5 curl", []string{"timeout", "curl"}},
+		{"timeout --signal=KILL 5 curl", []string{"timeout", "curl"}},
+		{"sudo --user root --group wheel id", []string{"sudo", "id"}},
+		{"env --unset FOO --chdir /tmp jq", []string{"env", "jq"}},
+		{"nice --adjustment 5 gzip", []string{"nice", "gzip"}},
+		{"xargs --max-args 1 curl", []string{"xargs", "curl"}},
+		{"stdbuf --output L awk 1", []string{"stdbuf", "awk"}},
+		{"sudo -nu root id", []string{"sudo", "id"}},
+		{"xargs -rn 1 curl", []string{"xargs", "curl"}},
+		{"timeout -vk 3 5 curl", []string{"timeout", "curl"}},
+		// The value is part of the word.
+		{"xargs -rn1 curl", []string{"xargs", "curl"}},
+		{"sudo -uroot id", []string{"sudo", "id"}},
+		// Long flags without a value.
+		{"sudo --non-interactive id", []string{"sudo", "id"}},
+	}
+	for _, tt := range tests {
+		if got := Commands(tt.script); !slices.Equal(got, tt.want) {
+			t.Errorf("Commands(%q) = %q, want %q", tt.script, got, tt.want)
+		}
+	}
+}
