@@ -719,6 +719,34 @@ func hasNote(o Outcome, kind explain.Kind, substr string) bool {
 	return false
 }
 
+func TestPassOnTruncatedOutputIsNoted(t *testing.T) {
+	full := backend.Result{Stdout: "y\n"}
+	cut := backend.Result{Stdout: "y\n", Truncated: true}
+	tests := map[string]struct {
+		ref, got backend.Result
+		want     bool
+	}{
+		"both truncated":      {cut, cut, true},
+		"reference truncated": {cut, full, true},
+		"target truncated":    {full, cut, true},
+		"complete output":     {full, full, false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			c := newFakeContainers()
+			c.results["a:latest"] = tt.got
+			rep := run(t, newEngine(&fakeHost{result: tt.ref}, c), Options{Command: "yes"}, distros("a"))
+			o := rep.Outcomes[0]
+			if o.Status != Pass {
+				t.Fatalf("status = %s, want PASS", o.Status)
+			}
+			if got := hasNote(o, explain.KindTruncated, "only the first 1 MiB"); got != tt.want {
+				t.Fatalf("truncation note = %v, want %v: %+v", got, tt.want, o.Notes)
+			}
+		})
+	}
+}
+
 func TestAutoInstallRerunsWithMissingCommand(t *testing.T) {
 	host := &fakeHost{result: backend.Result{Stdout: "1.7\n"}}
 	c := newFakeContainers()
